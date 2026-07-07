@@ -73,7 +73,8 @@ bool ue_channel_state_manager::handle_csi_report(const csi_report_data& csi_repo
 
 void ue_channel_state_manager::update_pusch_snr(float snr_db)
 {
-  pusch_snr_db = snr_db;
+  pusch_snr_db           = snr_db;
+  pusch_snr_report_received = true;
   average_pusch_sinr_dB.push(static_cast<float>(snr_db));
 }
 

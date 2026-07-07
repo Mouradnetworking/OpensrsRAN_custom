@@ -144,6 +144,9 @@ void cell_scheduler::run_slot(slot_point sl_tx)
 
   // > Push the scheduler results to the metrics handler.
   metrics.push_result(sl_tx, last_result(), slot_dur);
+
+  // > Dump the per-UE RAN-state telemetry snapshot (experimental, opt-in via SRSRAN_UE_STATE_PIPE).
+  ue_state_logger.log_slot_result(sl_tx, cell_cfg, last_result(), *ue_sched);
 }
 
 void cell_scheduler::handle_error_indication(slot_point sl_tx, scheduler_slot_handler::error_outcome event)

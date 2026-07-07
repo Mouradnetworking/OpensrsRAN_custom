@@ -271,6 +271,10 @@ static std::optional<dl_sched_context> get_dl_sched_context(const slice_ue&     
       // NewTx Case.
       nof_layers                           = ue_cc.channel_state_manager().get_nof_dl_layers();
       const pdsch_config_params& pdsch_cfg = ss.get_pdsch_config(pdsch_td_index, nof_layers);
+      // Throughput cap: clamp the newTx payload to the UE's configured DL bitrate budget for this slot. HARQ
+      // retransmissions (the "else" branch below) are never throttled, since they carry already-counted data and
+      // skipping them would only waste HARQ processes and hurt reliability.
+      pending_bytes      = std::min(pending_bytes, ue_cc.dl_bitrate_limiter().get_max_grantable_bytes(pdsch_slot));
       auto mcs_prbs_sel = compute_newtx_required_mcs_and_prbs(pdsch_cfg, ue_cc, pending_bytes, nof_rb_lims);
       if (not mcs_prbs_sel.has_value()) {
         // Note: No point in carrying on.
@@ -432,6 +436,9 @@ static std::optional<ul_sched_context> get_ul_sched_context(const slice_ue&     
       // Note: We assume k2 <= k1, which means that all the HARQ bits are set at this point for this UL slot and UE.
       pusch_cfg =
           compute_newtx_pusch_config_params(ue_cc, dci_type, pusch_td_res, uci_nof_harq_bits, is_csi_report_slot);
+      // Throughput cap: clamp the newTx grant to the UE's configured UL bitrate budget for this slot. HARQ
+      // retransmissions (the "else" branch below) are never throttled.
+      pending_bytes      = std::min(pending_bytes, ue_cc.ul_bitrate_limiter().get_max_grantable_bytes(pusch_slot));
       auto mcs_prbs_sel = compute_newtx_required_mcs_and_prbs(pusch_cfg, ue_cc, pending_bytes, nof_rb_lims);
       if (not mcs_prbs_sel.has_value()) {
         return std::nullopt;

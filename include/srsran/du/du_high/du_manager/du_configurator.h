@@ -42,6 +42,15 @@ struct du_mac_sched_control_config {
   std::optional<unsigned> num_harq_retransmissions;
   /// Set the radio resource management policy list.
   std::vector<rrm_policy_ratio_group> rrm_policy_ratio_list;
+  /// \brief Maximum sustained DL bitrate to apply to the UE, in kbps. \c std::nullopt means "do not cap".
+  /// \remark Like \c rrm_policy_ratio_list, this fully replaces the UE's resource-allocation configuration on
+  /// every request (see \c du_ue_ric_configuration_procedure) - it is not merged with a previous request. A
+  /// request that only sets this field will reset any previously configured PRB quota to unrestricted, and vice
+  /// versa. Callers that want to preserve both must resend both on every request.
+  std::optional<unsigned> max_dl_bitrate_kbps;
+  /// \brief Maximum sustained UL bitrate to apply to the UE, in kbps. \c std::nullopt means "do not cap".
+  /// \remark Same full-replace caveat as \ref max_dl_bitrate_kbps.
+  std::optional<unsigned> max_ul_bitrate_kbps;
 };
 
 /// Result of a UE-level cell MAC scheduler parameter configuration procedure.
@@ -49,6 +58,7 @@ struct du_mac_sched_control_config_response {
   bool harq_processes_result;
   bool min_prb_alloc_result;
   bool max_prb_alloc_result;
+  bool bitrate_cap_result;
 };
 
 /// Parameters of a cell that need to be configured during the DU cell operation.

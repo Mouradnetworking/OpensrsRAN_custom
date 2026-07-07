@@ -112,17 +112,21 @@ class cell_metrics_handler final : public sched_metrics_ue_configurator
     // with std::optional.
     ue_metric_context() {}
 
-    pci_t                                  pci;
-    du_ue_index_t                          ue_index;
-    rnti_t                                 rnti;
-    unsigned                               last_bsr = 0;
-    std::optional<int>                     last_phr;
-    std::array<unsigned, MAX_NOF_RB_LCIDS> last_dl_bs{0};
-    std::optional<float>                   last_dl_olla;
-    std::optional<float>                   last_ul_olla;
-    non_persistent_data                    data;
+    pci_t                                     pci;
+    du_ue_index_t                             ue_index;
+    rnti_t                                    rnti;
+    unsigned                                  last_bsr = 0;
+    std::optional<int>                        last_phr;
+    std::array<unsigned, MAX_NOF_RB_LCIDS>    last_dl_bs{0};
+    /// Time-of-arrival, in slots, of the oldest pending PDU of each logical channel, as last reported by the RLC.
+    /// Only meaningful where the co-indexed \ref last_dl_bs entry is non-zero.
+    std::array<slot_point, MAX_NOF_RB_LCIDS>  last_dl_hol_toa{};
+    std::optional<float>                      last_dl_olla;
+    std::optional<float>                      last_ul_olla;
+    non_persistent_data                       data;
 
-    scheduler_ue_metrics compute_report(std::chrono::milliseconds metric_report_period, unsigned nof_slots_per_sf);
+    scheduler_ue_metrics
+    compute_report(std::chrono::milliseconds metric_report_period, unsigned nof_slots_per_sf, slot_point sl_tx);
     void                 reset();
   };
 

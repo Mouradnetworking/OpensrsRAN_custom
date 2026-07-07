@@ -37,4 +37,5 @@ add_library(sched_support STATIC
         sch_pdu_builder.cpp
         csi_report_helpers.cpp
         pusch_power_controller.cpp
-        pucch_power_controller.cpp)
+        pucch_power_controller.cpp
+        ue_bitrate_limiter.cpp)

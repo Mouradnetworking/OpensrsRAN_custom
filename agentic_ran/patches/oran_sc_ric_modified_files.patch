@@ -1,0 +1,79 @@
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 59f7732..f953db3 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,5 +1,3 @@
+-version: '3.9'
+-
+ services:
+   dbaas:
+     container_name: ric_dbaas
+diff --git a/xApps/python/kpm_mon_xapp.py b/xApps/python/kpm_mon_xapp.py
+index ce2c112..4efb1c9 100755
+--- a/xApps/python/kpm_mon_xapp.py
++++ b/xApps/python/kpm_mon_xapp.py
+@@ -45,8 +45,8 @@ class MyXapp(xAppBase):
+     # It is required to start the internal msg receive loop.
+     @xAppBase.start_function
+     def start(self, e2_node_id, kpm_report_style, ue_ids, metric_names):
+-        report_period = 1000
+-        granul_period = 1000
++        report_period = 30
++        granul_period = 30
+ 
+         # use always the same subscription callback, but bind kpm_report_style parameter
+         subscription_callback = lambda agent, sub, hdr, msg: self.my_subscription_callback(agent, sub, hdr, msg, kpm_report_style, None)
+diff --git a/xApps/python/lib/e2sm_rc_module.py b/xApps/python/lib/e2sm_rc_module.py
+index bd9b8e2..a7dffea 100644
+--- a/xApps/python/lib/e2sm_rc_module.py
++++ b/xApps/python/lib/e2sm_rc_module.py
+@@ -179,6 +179,36 @@ class e2sm_rc_module(object):
+         payload = self._build_ric_control_request(control_header, control_msg, ack_request)
+         self.parent.rmr_send(e2_node_id, payload, 12040, retries=1)
+ 
++    def send_control_request_style_2_action_201(self, e2_node_id, ue_id, max_dl_kbps=None, max_ul_kbps=None, ack_request=1):
++        """srsRAN-specific extension (not a standard O-RAN E2SM-RC action): caps a UE's sustained DL/UL
++        bitrate directly, in kbps. Unlike control_slice_level_prb_quota (Style 2, Action 6), which caps the
++        *resource share* percentage, this caps the achieved *rate* regardless of channel conditions.
++
++        At least one of max_dl_kbps / max_ul_kbps must be provided. Passing None for one of them leaves that
++        direction's cap unset in this request - note that, like the PRB-quota action, this request fully
++        replaces the UE's resource-allocation config, so a DL-only request will not preserve a UL cap set by
++        a previous request (send both together if you want both to persist).
++        """
++        if max_dl_kbps is None and max_ul_kbps is None:
++            print("ERROR: E2SM-RC Control Request - UE Bitrate Cap: at least one of max_dl_kbps/max_ul_kbps is required")
++            return
++
++        ue_id = ('gNB-DU-UEID', {'gNB-CU-UE-F1AP-ID': ue_id})
++        control_header = self.e2sm_rc_compiler.pack_ric_control_header_f1(style_type=2, control_action_id=201, ue_id_tuple=ue_id)
++
++        ran_p_list = []
++        if max_dl_kbps is not None:
++            ran_p_list.append({'ranParameter-ID': 1, 'ranParameter-valueType': ('ranP-Choice-ElementFalse', {'ranParameter-value': ('valueInt', int(max_dl_kbps))})})
++        if max_ul_kbps is not None:
++            ran_p_list.append({'ranParameter-ID': 2, 'ranParameter-valueType': ('ranP-Choice-ElementFalse', {'ranParameter-value': ('valueInt', int(max_ul_kbps))})})
++
++        control_msg_dict = {'ric-controlMessage-formats': ('controlMessage-Format1', {'ranP-List': ran_p_list})}
++
++        control_msg = self.e2sm_rc_compiler.pack_ric_control_msg(control_msg_dict)
++        payload = self._build_ric_control_request(control_header, control_msg, ack_request)
++        self.parent.rmr_send(e2_node_id, payload, 12040, retries=1)
++
+     # Alias with a nice name
+     control_slice_level_prb_quota = send_control_request_style_2_action_6
+     control_handover = send_control_request_style_3_action_1
++    control_ue_bitrate_cap = send_control_request_style_2_action_201
+diff --git a/xApps/python/simple_xapp.py b/xApps/python/simple_xapp.py
+index abd819c..42699f1 100755
+--- a/xApps/python/simple_xapp.py
++++ b/xApps/python/simple_xapp.py
+@@ -82,7 +82,7 @@ class MyXapp(xAppBase):
+ 
+ if __name__ == '__main__':
+     parser = argparse.ArgumentParser(description='My example xApp')
+-    parser.add_argument("--http_server_port", type=int, default=8090, help="HTTP server listen port")
++    parser.add_argument("--http_server_port", type=int, default=8092, help="HTTP server listen port")
+     parser.add_argument("--rmr_port", type=int, default=4560, help="RMR port")
+     parser.add_argument("--e2_node_id", type=str, default='gnbd_001_001_00019b_0', help="E2 Node ID")
+     parser.add_argument("--ran_func_id", type=int, default=2, help="RAN function ID")

@@ -284,6 +284,10 @@ void ue_cell_grid_allocator::set_pdsch_params(dl_grant_info&                    
                      u.crnti);
     }
     mcs_tbs_info = mcs_or_error.value_or(sch_mcs_tbs{sch_mcs_index{0}, 0});
+
+    // Throughput cap: account for the bytes actually granted (retransmissions are not throttled/counted, see the
+    // corresponding clamp in grant_params_selector.cpp).
+    ue_cc.dl_bitrate_limiter().consume(pdsch_alloc.slot, mcs_tbs_info.tbs);
   }
 
   // Mark resources as occupied in the ResourceGrid.
@@ -657,6 +661,10 @@ void ue_cell_grid_allocator::set_pusch_params(ul_grant_info& grant, const vrb_in
           static_cast<unsigned>(
               ue_cell_cfg.init_bwp().ul_ded->pusch_cfg->pusch_mapping_type_a_dmrs.value().additional_positions));
     }
+
+    // Throughput cap: account for the bytes actually granted (retransmissions are not throttled/counted, see the
+    // corresponding clamp in grant_params_selector.cpp).
+    ue_cc.ul_bitrate_limiter().consume(pusch_alloc.slot, mcs_tbs_info.value().tbs);
 
   } else {
     // If it's a reTx, fetch the MCS, TBS and number of layers from the previous transmission.

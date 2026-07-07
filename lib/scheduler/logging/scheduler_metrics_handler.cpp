@@ -381,7 +381,8 @@ void cell_metrics_handler::handle_dl_buffer_state_indication(const dl_buffer_sta
     auto& u = ues[dl_bs.ue_index];
 
     // Store last DL buffer state.
-    u.last_dl_bs[dl_bs.lcid] = dl_bs.bs;
+    u.last_dl_bs[dl_bs.lcid]      = dl_bs.bs;
+    u.last_dl_hol_toa[dl_bs.lcid] = dl_bs.hol_toa;
   }
 }
 
@@ -407,7 +408,7 @@ void cell_metrics_handler::report_metrics()
   const std::chrono::milliseconds report_period{data.nof_slots / last_slot_tx.nof_slots_per_subframe()};
   for (ue_metric_context& ue : ues) {
     // Compute statistics of the UE metrics and push the result to the report.
-    next_report->ue_metrics.push_back(ue.compute_report(report_period, nof_slots_per_sf));
+    next_report->ue_metrics.push_back(ue.compute_report(report_period, nof_slots_per_sf, last_slot_tx));
   }
   next_report->events.swap(pending_events);
 
@@ -612,7 +613,8 @@ void cell_metrics_handler::handle_cell_deactivation()
 
 scheduler_ue_metrics
 cell_metrics_handler::ue_metric_context::compute_report(std::chrono::milliseconds metric_report_period,
-                                                        unsigned                  slots_per_sf)
+                                                        unsigned                  slots_per_sf,
+                                                        slot_point                sl_tx)
 {
   auto convert_slots_to_ms = [slots_per_sf](unsigned slots) {
     return static_cast<float>(slots) / static_cast<float>(slots_per_sf);
@@ -647,6 +649,21 @@ cell_metrics_handler::ue_metric_context::compute_report(std::chrono::millisecond
   ret.dl_bs               = 0;
   for (const unsigned value : last_dl_bs) {
     ret.dl_bs += value;
+  }
+  // DL HOL delay: age of the oldest pending PDU across all logical channels that currently have pending bytes.
+  // Only meaningful (and only reported) while there is DL data actually queued for this UE.
+  if (sl_tx.valid()) {
+    slot_point oldest_hol_toa;
+    for (unsigned lcid = 0; lcid != last_dl_bs.size(); ++lcid) {
+      if (last_dl_bs[lcid] > 0 and last_dl_hol_toa[lcid].valid()) {
+        if (not oldest_hol_toa.valid() or last_dl_hol_toa[lcid] < oldest_hol_toa) {
+          oldest_hol_toa = last_dl_hol_toa[lcid];
+        }
+      }
+    }
+    if (oldest_hol_toa.valid() and sl_tx >= oldest_hol_toa) {
+      ret.dl_hol_delay_ms = convert_slots_to_ms(static_cast<unsigned>(sl_tx - oldest_hol_toa));
+    }
   }
   ret.ta_stats                       = data.ta;
   ret.pusch_ta_stats                 = data.pusch_ta;

@@ -27,6 +27,7 @@
 #include "../support/bwp_helpers.h"
 #include "../support/pucch_power_controller.h"
 #include "../support/pusch_power_controller.h"
+#include "../support/ue_bitrate_limiter.h"
 #include "ue_channel_state_manager.h"
 #include "ue_drx_controller.h"
 #include "ue_link_adaptation_controller.h"
@@ -188,6 +189,12 @@ public:
   pucch_power_controller&       get_pucch_power_controller() { return pucch_pwr_controller; }
   const pucch_power_controller& get_pucch_power_controller() const { return pucch_pwr_controller; }
 
+  /// \brief Optional, RIC/O&M-configurable DL/UL bitrate caps for this UE. See \ref ue_bitrate_limiter.
+  ue_bitrate_limiter&       dl_bitrate_limiter() { return dl_bitrate_limiter_; }
+  const ue_bitrate_limiter& dl_bitrate_limiter() const { return dl_bitrate_limiter_; }
+  ue_bitrate_limiter&       ul_bitrate_limiter() { return ul_bitrate_limiter_; }
+  const ue_bitrate_limiter& ul_bitrate_limiter() const { return ul_bitrate_limiter_; }
+
   /// \brief Returns an estimated DL rate in bytes per slot based on the given input parameters.
   double get_estimated_dl_rate(const pdsch_config_params& pdsch_cfg, sch_mcs_index mcs, unsigned nof_prbs) const;
   /// \brief Returns an estimated UL rate in bytes per slot based on the given input parameters.
@@ -224,6 +231,9 @@ private:
 
   pusch_power_controller pusch_pwr_controller;
   pucch_power_controller pucch_pwr_controller;
+
+  ue_bitrate_limiter dl_bitrate_limiter_;
+  ue_bitrate_limiter ul_bitrate_limiter_;
 };
 
 } // namespace srsran

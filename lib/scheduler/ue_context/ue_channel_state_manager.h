@@ -53,10 +53,24 @@ public:
   void update_pusch_snr(float snr_db);
 
   /// \brief Get PUSCH SNR in dB.
+  /// \remark Until the first real UL SINR estimate is received from the PHY, this returns the cell's configured
+  /// \c initial_ul_sinr assumption, not a measurement. Use \ref has_pusch_snr_report to tell the two apart.
   float get_pusch_snr() const { return pusch_snr_db; }
 
   /// \brief Get average PUSCH SNR in dB.
+  /// \remark Same caveat as \ref get_pusch_snr applies until the first report is received.
   float get_pusch_average_sinr() const { return average_pusch_sinr_dB.get_average_value(); }
+
+  /// \brief Whether at least one real UL SINR estimate has been received from the PHY for this UE.
+  /// \remark Distinguishes a genuine measurement from the initial \c expert_cfg.initial_ul_sinr assumption that
+  /// \ref get_pusch_snr / \ref get_pusch_average_sinr return before any feedback has arrived.
+  bool has_pusch_snr_report() const { return pusch_snr_report_received; }
+
+  /// \brief Get the latest PUSCH RSRP reported by the PHY, in dBFS.
+  /// \return \c std::nullopt if no PUSCH RSRP has ever been reported for this UE.
+  const std::optional<float>& get_pusch_rsrp() const { return pusch_rsrp_dbfs; }
+
+  void update_pusch_rsrp(float rsrp_dbfs) { pusch_rsrp_dbfs = rsrp_dbfs; }
 
   csi_report_wideband_cqi_type get_wideband_cqi() const { return wideband_cqi; }
 
@@ -102,11 +116,17 @@ private:
   /// \brief Number of DL ports.
   unsigned nof_dl_ports;
 
-  /// Estimated PUSCH SNR, in dB.
+  /// Estimated PUSCH SNR, in dB. Seeded from \c expert_cfg.initial_ul_sinr until the first real report arrives.
   float pusch_snr_db;
+
+  /// Set to true the first time a real PUSCH SNR report is received (see \ref has_pusch_snr_report).
+  bool pusch_snr_report_received = false;
 
   /// Time-averaged PUSCH SINR, in dB.
   exp_average_fast_start<float> average_pusch_sinr_dB;
+
+  /// Latest PUSCH RSRP reported by the PHY, in dBFS. \c std::nullopt if never reported.
+  std::optional<float> pusch_rsrp_dbfs;
 
   /// \brief Recommended CQI to be used to derive the DL MCS.
   csi_report_wideband_cqi_type wideband_cqi;

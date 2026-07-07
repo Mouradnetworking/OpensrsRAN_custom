@@ -78,6 +78,10 @@ struct scheduler_ue_metrics {
   unsigned sr_count;
   /// Sum of the last DL buffer occupancy reports of all logical channels.
   unsigned dl_bs;
+  /// \brief Instantaneous DL head-of-line (HOL) queueing delay, in milliseconds, i.e. how long the oldest DL PDU
+  /// currently pending across this UE's logical channels has been waiting for transmission, measured at report time.
+  /// \c std::nullopt if the UE has no pending DL data (no HOL to measure), not if the delay is zero.
+  std::optional<float> dl_hol_delay_ms;
   /// Invalid UCI reception metrics.
   /// @{
   unsigned nof_pucch_f0f1_invalid_harqs;
