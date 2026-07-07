@@ -10,7 +10,7 @@ from misc.db.python.Open5GS import Open5GS
 
 
 def add_user(imsi, key="00112233445566778899aabbccddeeff", op=None,
-             opc="63bfa50ee6523365ff14c1f45f88737d", amf="9001", apn="srsapn", qci="9", ip_alloc=""):
+             opc="63bfa50ee6523365ff14c1f45f88737d", amf="8000", apn="srsapn", qci="9", ip_alloc=""):
     '''Add UE data to Open5GS mongodb'''
 
     if op is not None:
@@ -37,6 +37,13 @@ def add_user(imsi, key="00112233445566778899aabbccddeeff", op=None,
                     "type": 3, "pcc_rule": [], "ambr": {"uplink": {"value": 1, "unit": 3}, "downlink": {"value": 1, "unit": 3}},
                     "qos": {
                         "index": 5,
+                        "arp": {"priority_level": 8, "pre_emption_capability": 1, "pre_emption_vulnerability": 1}
+                    },
+                {
+                    "name": "internet",
+                    "type": 1, "pcc_rule": [], "ambr": {"uplink": {"value": 1, "unit": 3}, "downlink": {"value": 1, "unit": 3}},
+                    "qos": {
+                        "index": 9,
                         "arp": {"priority_level": 8, "pre_emption_capability": 1, "pre_emption_vulnerability": 1}
                     }
                 }
