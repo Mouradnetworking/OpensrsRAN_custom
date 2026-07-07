@@ -1,0 +1,2 @@
+/usr/bin/ar qc libsrsran_rohc.a CMakeFiles/srsran_rohc.dir/rohc_factory.cpp.o CMakeFiles/srsran_rohc.dir/rohc_support.cpp.o
+/usr/bin/ranlib libsrsran_rohc.a

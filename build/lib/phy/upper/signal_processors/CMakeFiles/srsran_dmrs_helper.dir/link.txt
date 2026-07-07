@@ -1,0 +1,2 @@
+/usr/bin/ar qc libsrsran_dmrs_helper.a CMakeFiles/srsran_dmrs_helper.dir/dmrs_helper.cpp.o
+/usr/bin/ranlib libsrsran_dmrs_helper.a

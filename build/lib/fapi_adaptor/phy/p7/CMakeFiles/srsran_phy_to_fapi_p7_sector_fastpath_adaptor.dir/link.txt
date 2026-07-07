@@ -1,0 +1,2 @@
+/usr/bin/ar qc libsrsran_phy_to_fapi_p7_sector_fastpath_adaptor.a CMakeFiles/srsran_phy_to_fapi_p7_sector_fastpath_adaptor.dir/phy_fapi_p7_sector_fastpath_adaptor_impl.cpp.o
+/usr/bin/ranlib libsrsran_phy_to_fapi_p7_sector_fastpath_adaptor.a

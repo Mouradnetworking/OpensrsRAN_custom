@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxnap_asn1.a CMakeFiles/xnap_asn1.dir/xnap/common.cpp.o CMakeFiles/xnap_asn1.dir/xnap/xnap_ies.cpp.o CMakeFiles/xnap_asn1.dir/xnap/xnap_pdu_contents.cpp.o CMakeFiles/xnap_asn1.dir/xnap/xnap.cpp.o
+/usr/bin/ranlib libxnap_asn1.a
