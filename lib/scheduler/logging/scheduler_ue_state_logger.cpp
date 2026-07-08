@@ -232,6 +232,68 @@ void scheduler_ue_state_logger::log_slot_result(slot_point                sl_tx,
     fmt::format_to(std::back_inserter(buf), "}}");
   }
 
+  fmt::format_to(std::back_inserter(buf), "],\"ul_grants\":[");
+
+  bool first_ul_ue = true;
+  for (const ul_sched_info& grant : result.ul.puschs) {
+    fmt::format_to(std::back_inserter(buf), "{}{{", first_ul_ue ? "" : ",");
+    first_ul_ue = false;
+    bool first_field = true;
+
+    // --- Raw grant decision. Always present: this is what sched_result gives us "for free". ---
+    append_field(buf, first_field, "rnti", to_value(grant.pusch_cfg.rnti));
+    append_field(buf, first_field, "ue_index", static_cast<unsigned>(grant.context.ue_index));
+    append_field(buf, first_field, "harq_id", static_cast<unsigned>(grant.pusch_cfg.harq_id));
+    append_field(buf, first_field, "new_data", grant.pusch_cfg.new_data);
+    append_field(buf, first_field, "nof_retxs", grant.context.nof_retxs);
+    append_field(buf, first_field, "mcs", grant.pusch_cfg.mcs_index.to_uint());
+
+    // RB allocation: same type1 (contiguous) / type0 (RBG bitmap) distinction as DL grants.
+    if (grant.pusch_cfg.rbs.is_type1()) {
+      append_field(buf, first_field, "rb_alloc_type", "\"contiguous\"");
+      append_field(buf, first_field, "rb_start", grant.pusch_cfg.rbs.type1().start());
+      append_field(buf, first_field, "rb_len", grant.pusch_cfg.rbs.type1().length());
+    } else {
+      append_field(buf, first_field, "rb_alloc_type", "\"rbg_bitmap\"");
+      const unsigned rb_len = convert_rbgs_to_prbs(grant.pusch_cfg.rbs.type0(),
+                                                   {0, cell_cfg.nof_ul_prbs},
+                                                   get_nominal_rbg_size(cell_cfg.nof_ul_prbs, true))
+                                  .count();
+      append_field(buf, first_field, "rb_len", rb_len);
+    }
+
+    if (grant.pusch_cfg.bwp_cfg != nullptr) {
+      append_field(buf, first_field, "bwp_start", grant.pusch_cfg.bwp_cfg->crbs.start());
+      append_field(buf, first_field, "bwp_size", grant.pusch_cfg.bwp_cfg->crbs.length());
+    }
+
+    // --- Live UE state enrichment. Every field below is emitted only if srsRAN actually has real data for it. ---
+    if (const ue_cell* ue_cc = ue_sched.find_ue_cell(grant.context.ue_index); ue_cc != nullptr) {
+      const ue_channel_state_manager& chan_state = ue_cc->channel_state_manager();
+
+      if (chan_state.has_pusch_snr_report()) {
+        append_field(buf, first_field, "pusch_sinr_db", chan_state.get_pusch_snr());
+        append_field(buf, first_field, "pusch_avg_sinr_db", chan_state.get_pusch_average_sinr());
+      }
+
+      if (chan_state.get_pusch_rsrp().has_value()) {
+        append_field(buf, first_field, "pusch_rsrp_dbfs", chan_state.get_pusch_rsrp().value());
+      }
+
+      if (std::optional<const ul_harq_process_handle> h = ue_cc->harqs.ul_harq(grant.pusch_cfg.harq_id);
+          h.has_value()) {
+        append_field(buf, first_field, "harq_max_retxs", h->max_nof_retxs());
+        append_field(buf, first_field, "harq_waiting_ack", h->is_waiting_ack());
+        if (h->get_grant_params().slice_id.has_value()) {
+          append_field(
+              buf, first_field, "ran_slice_id", static_cast<unsigned>(h->get_grant_params().slice_id.value().value()));
+        }
+      }
+    }
+
+    fmt::format_to(std::back_inserter(buf), "}}");
+  }
+
   fmt::format_to(std::back_inserter(buf), "]}}");
 
   (*log_chan)("{}", fmt::to_string(buf));

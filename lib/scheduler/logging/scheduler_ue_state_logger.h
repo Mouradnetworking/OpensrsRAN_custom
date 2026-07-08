@@ -37,12 +37,14 @@ struct sched_result;
 /// \brief Experimental per-slot, per-UE RAN-state telemetry exporter.
 ///
 /// This is a native srsRAN telemetry surface, not a reproduction of any external stack's wire format. On every
-/// slot, for every DL grant decided by the scheduler, it emits a self-describing JSON line combining:
-///  - the raw grant decision (from \c sched_result: RNTI, HARQ id, MCS, RB allocation, retransmission count,
-///    post-grant DL buffer occupancy);
+/// slot, for every DL and UL grant decided by the scheduler, it emits a self-describing JSON line combining:
+///  - the raw grant decision (from \c sched_result: RNTI, HARQ id, MCS, RB allocation, retransmission count;
+///    DL grants additionally carry post-grant DL buffer occupancy - no equivalent live pending-bytes accessor
+///    is exposed for UL grants yet, so that one field is DL-only, see .cpp);
 ///  - live per-UE channel state (wideband CQI, DL RI, PUSCH SINR/RSRP), read via the new read-only
 ///    \c ue_cell_scheduler::find_ue_cell() accessor;
-///  - live HARQ process state (max retransmissions, waiting-ACK status) and the grant's RAN slice id.
+///  - live HARQ process state (max retransmissions, waiting-ACK status) and the grant's RAN slice id, via
+///    \c ue_cell::harqs.dl_harq()/ul_harq() as appropriate.
 ///
 /// \remark Design principle: a field is present in the JSON only when srsRAN actually has real data for it. There
 /// are no fabricated zero/default placeholders - see scheduler_ue_state_logger.cpp for exactly which conditions
@@ -56,15 +58,12 @@ struct sched_result;
 ///
 /// \remark Fully opt-in: disabled (a single null check) unless the SRSRAN_UE_STATE_PIPE environment variable is
 /// set (to the desired FIFO path) before the process starts.
-///
-/// \remark Scope: DL grants only in this iteration. The UL-side equivalent (against sched_result.ul.puschs and
-/// ul_harq_process_handle) follows the identical pattern and is a documented next step, not implemented here.
 class scheduler_ue_state_logger
 {
 public:
   scheduler_ue_state_logger();
 
-  /// \brief Logs the DL grants and associated live UE state for a given slot.
+  /// \brief Logs the DL and UL grants and associated live UE state for a given slot.
   /// \param[in] sl_tx Slot for which \c result was computed.
   /// \param[in] cell_cfg Configuration of the cell \c result belongs to (PCI, PRB-grid dimensions).
   /// \param[in] result Scheduler result for this cell and slot.

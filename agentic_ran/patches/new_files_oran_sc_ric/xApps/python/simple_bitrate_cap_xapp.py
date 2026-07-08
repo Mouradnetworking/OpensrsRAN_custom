@@ -15,15 +15,17 @@ class MyXapp(xAppBase):
     # It is required to start the internal msg receive loop.
     @xAppBase.start_function
     def start(self, e2_node_id, ue_id):
-        # Cycles the UE's DL bitrate cap through a few steps, holding each for 5s, so the effect on
-        # achieved throughput can be observed (e.g. via the dl_brate field in InfluxDB/Grafana).
+        # Cycles the UE's DL and UL bitrate caps together through a few steps, holding each for 5s, so the
+        # effect on achieved throughput can be observed (e.g. via the dl_brate/ul_brate fields in
+        # InfluxDB/Grafana). DL and UL are capped to the same value at each step for simplicity; they are
+        # independent RIC parameters (max_dl_kbps/max_ul_kbps) and could be driven separately if needed.
         steps_kbps = [5000, 15000, 30000, 60000]
         while self.running:
-            for max_dl_kbps in steps_kbps:
+            for kbps in steps_kbps:
                 current_time = datetime.datetime.now()
-                print("{} Send RIC Control Request to E2 node ID: {} for UE ID: {}, max_dl_kbps: {}".format(
-                    current_time.strftime("%H:%M:%S"), e2_node_id, ue_id, max_dl_kbps))
-                self.e2sm_rc.control_ue_bitrate_cap(e2_node_id, ue_id, max_dl_kbps=max_dl_kbps, ack_request=1)
+                print("{} Send RIC Control Request to E2 node ID: {} for UE ID: {}, max_dl_kbps: {}, max_ul_kbps: {}".format(
+                    current_time.strftime("%H:%M:%S"), e2_node_id, ue_id, kbps, kbps))
+                self.e2sm_rc.control_ue_bitrate_cap(e2_node_id, ue_id, max_dl_kbps=kbps, max_ul_kbps=kbps, ack_request=1)
                 time.sleep(5)
 
 

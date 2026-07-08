@@ -5,6 +5,10 @@ testbed (see §14). A second control action (UE bitrate cap) was implemented and
 (§14.4). All of it is opt-in or additive: no existing production code path changes behavior unless a cap/quota is
 explicitly configured, or an experimental env var is set.
 
+UL extension (§6, §14.4, §16): Layer 2 telemetry now also covers UL grants, and the demo xApp now exercises the
+UL bitrate cap (previously implemented but never exercised end-to-end). Builds clean (§16); live re-validation
+against a real UL-saturating flow is pending as of this writing.
+
 ## 1. High-level objective
 
 The end goal is an **Agentic RAN** deployment: agents / xApps that can
@@ -148,10 +152,14 @@ See §15 for the control-plane files added later in this effort.
   Disabled unless the `SRSRAN_UE_STATE_PIPE` environment variable names a FIFO path; when enabled, installs a
   custom srslog sink (`ue_state_pipe_sink`) that opens the FIFO non-blocking and drops samples rather than ever
   blocking the scheduler thread (formatting happens on the caller's thread, the actual `write()` happens on
-  srslog's async backend thread). Emits one `{"schema":"srsran_ue_state_v1", ...}` JSON line per slot, with one
-  object per DL grant. Supports: raw grant decision (RNTI, UE index, HARQ id, MCS, RB allocation, retransmission
-  count, DL buffer occupancy — all "free" from `sched_result`), plus live channel-state/HARQ enrichment looked up
-  through the new `find_ue_cell()` accessor (see below).
+  srslog's async backend thread). Emits one `{"schema":"srsran_ue_state_v1", ...}` JSON line per slot, with a
+  `"dl_grants"` array (one object per DL grant) and a `"ul_grants"` array (one object per UL/PUSCH grant, added
+  in a later pass, following the identical pattern). Supports: raw grant decision (RNTI, UE index, HARQ id,
+  MCS, RB allocation, retransmission count — plus DL buffer occupancy for DL grants specifically, "free" from
+  `sched_result`; no live pending-bytes accessor is currently exposed for UL grants, see §9), plus live
+  channel-state/HARQ enrichment looked up through the new `find_ue_cell()` accessor (see below) - the same
+  accessor and the same `ue_channel_state_manager`/HARQ types serve both directions, since PUSCH SINR/RSRP and
+  the HARQ handles are already direction-agnostic APIs (`ue_cell::harqs.dl_harq()`/`.ul_harq()`).
 - **`lib/scheduler/logging/CMakeLists.txt`** — Builds the new source and links `sched_ue_context` (needed for the
   `ue_cell`/channel-state/HARQ types the logger reads).
 - **`lib/scheduler/cell_scheduler.{h,cpp}`** — `cell_scheduler` now owns a `scheduler_ue_state_logger` member and
@@ -205,13 +213,22 @@ statistics, several turnaround-delay statistics (UL CE, CRC, PUSCH/PUCCH HARQ, S
 counters (PRACH preambles, MSG3 OK/NOK, failed PDCCH/UCI allocations, decision latency histogram, PUCCH RB usage,
 per-TDD-slot PRB usage).
 
-### Layer 2 (per slot, per DL grant; opt-in JSON pipe)
+### Layer 2 (per slot, per DL/UL grant; opt-in JSON pipe)
 
-`rnti`, `ue_index`, `harq_id`, `new_data`, `nof_retxs`, `mcs`, `dl_buffer_occupancy_bytes`, `rb_alloc_type` +
-(`rb_start`,`rb_len` for contiguous grants, or `rb_len` alone for RBG-bitmap grants), `bwp_start`, `bwp_size`,
-`wideband_cqi`, `dl_ri` (both only if the latest CSI report is valid), `pusch_sinr_db` + `pusch_avg_sinr_db`
-(only once a real report has arrived), `pusch_rsrp_dbfs` (once reported), `harq_max_retxs`, `harq_waiting_ack`,
-`ran_slice_id` (if the grant belongs to a configured slice). Envelope: `schema`, `ts_ns`, `sfn`, `slot`, `pci`.
+**`dl_grants`**: `rnti`, `ue_index`, `harq_id`, `new_data`, `nof_retxs`, `mcs`, `dl_buffer_occupancy_bytes`,
+`rb_alloc_type` + (`rb_start`,`rb_len` for contiguous grants, or `rb_len` alone for RBG-bitmap grants),
+`bwp_start`, `bwp_size`, `wideband_cqi`, `dl_ri` (both only if the latest CSI report is valid), `pusch_sinr_db`
++ `pusch_avg_sinr_db` (only once a real report has arrived), `pusch_rsrp_dbfs` (once reported),
+`harq_max_retxs`, `harq_waiting_ack`, `ran_slice_id` (if the grant belongs to a configured slice).
+
+**`ul_grants`**: `rnti`, `ue_index`, `harq_id`, `new_data`, `nof_retxs`, `mcs`, `rb_alloc_type` +
+(`rb_start`,`rb_len`/`rb_len`, same convention as DL), `bwp_start`, `bwp_size`, `pusch_sinr_db` +
+`pusch_avg_sinr_db`, `pusch_rsrp_dbfs`, `harq_max_retxs`, `harq_waiting_ack`, `ran_slice_id` - identical to
+`dl_grants` except no `dl_buffer_occupancy_bytes`-equivalent field (no live pending-UL-bytes accessor
+currently exposed to this component, see §9) and no `wideband_cqi`/`dl_ri` (those are DL CSI-report fields,
+not applicable to a UL grant).
+
+Envelope, shared by both arrays: `schema`, `ts_ns`, `sfn`, `slot`, `pci`.
 
 ## 8. Metric-by-metric source table
 
@@ -226,17 +243,19 @@ per-TDD-slot PRB usage).
 | PUSCH SINR/RSRP (live snapshot) | `ue_channel_state_manager` (`get_pusch_snr`/`get_pusch_rsrp`), read via new `scheduler_ue_state_logger` | Real once first report arrives (`has_pusch_snr_report()` / `optional` gates it); seeded default beforehand | dB / dBFS | UL | per-UE |
 | PUCCH SINR | `cell_metrics_handler::handle_pucch_sinr` | Real | dB | UL | per-UE |
 | DL/UL MCS (interval mean) | `cell_metrics_handler` (`dl_mcs`/`ul_mcs` accumulators) | Real (averaged) | MCS index | both | per-UE |
-| MCS (per grant) | `scheduler_ue_state_logger` from `sched_result` | Real | MCS index | DL | per-UE, per-grant |
+| MCS (per grant) | `scheduler_ue_state_logger` from `sched_result` (`dl_grants`/`ul_grants`) | Real | MCS index | both | per-UE, per-grant |
 | PRB allocation (total used) | `cell_metrics_handler` (`tot_dl_prbs_used`/`tot_ul_prbs_used`) | Real (aggregated) | # PRBs | both | per-UE |
-| PRB allocation (exact, per grant) | `scheduler_ue_state_logger` from `dl_msg_alloc::pdsch_cfg.rbs` | Real | RB index/count | DL | per-UE, per-grant |
-| HARQ process id | `scheduler_ue_state_logger` from `pdsch_cfg.harq_id` | Real | id | DL | per-UE, per-grant |
-| Retransmission count | `scheduler_ue_state_logger` from `grant.context.nof_retxs`; also `harq_max_retxs`/`is_waiting_ack` from `dl_harq_process_handle` | Real | count | DL | per-UE, per-grant |
+| PRB allocation (exact, per grant) | `scheduler_ue_state_logger` from `dl_msg_alloc::pdsch_cfg.rbs` / `ul_sched_info::pusch_cfg.rbs` | Real | RB index/count | both | per-UE, per-grant |
+| HARQ process id | `scheduler_ue_state_logger` from `pdsch_cfg.harq_id` / `pusch_cfg.harq_id` | Real | id | both | per-UE, per-grant |
+| Retransmission count | `scheduler_ue_state_logger` from `grant.context.nof_retxs`; also `harq_max_retxs`/`is_waiting_ack` from `dl_harq_process_handle`/`ul_harq_process_handle` | Real | count | both | per-UE, per-grant |
 | BLER / ACK-NACK derived | `cell_metrics_handler` (`dl_nof_ok`/`dl_nof_nok`, `ul_nof_ok`/`ul_nof_nok`) | Real (counts; BLER = nok/(ok+nok) computed by consumer) | count | both | per-UE |
 | Throughput / bit rate | `cell_metrics_handler` (`dl_brate_kbps`/`ul_brate_kbps`, from acknowledged TB bytes / report period) | Real | kbps | both | per-UE |
-| BSR / pending UL bytes | `cell_metrics_handler::handle_ul_bsr_indication` | Real | bytes | UL | per-UE |
+| BSR / pending UL bytes (periodic) | `cell_metrics_handler::handle_ul_bsr_indication` | Real | bytes | UL | per-UE |
 | DL buffer occupancy | `cell_metrics_handler::handle_dl_buffer_state_indication` (`dl_bs`, aggregated) / `scheduler_ue_state_logger` (`dl_buffer_occupancy_bytes`, per-grant post-allocation value) | Real | bytes | DL | per-UE (both scopes) |
+| Pending UL bytes (per-grant) | — | **Unavailable at grant level** — `ue::pending_ul_newtx_bytes()` exists but isn't reachable from `scheduler_ue_state_logger`'s current `ue_cell`-scoped accessor; see §9 | bytes | UL | per-UE, per-grant |
 | DL HOL delay (**new**) | RLC Tx entities (`lib/rlc/rlc_tx_{tm,um,am}_entity.cpp`) → `dl_buffer_state_indication_message::hol_toa` → `cell_metrics_handler` (this change) | Real | ms | DL | per-UE |
-| RAN slice id | `scheduler_ue_state_logger` from `dl_harq_process_handle::get_grant_params().slice_id` | Real (when the UE belongs to a configured slice) | id | DL | per-UE, per-grant |
+| UL queueing-delay proxy | `cell_metrics_handler` (`avg_sr_to_pusch_delay`/`max_sr_to_pusch_delay`) | Real, but a coarser proxy (SR→grant turnaround, not true per-SDU HOL delay) — see §9/§14.3 for why no `ul_hol_delay_ms` equivalent exists | ms | UL | per-UE |
+| RAN slice id | `scheduler_ue_state_logger` from `dl_harq_process_handle`/`ul_harq_process_handle::get_grant_params().slice_id` | Real (when the UE belongs to a configured slice) | id | both | per-UE, per-grant |
 | PCI / cell id | `cell_configuration::pci`, carried on every Layer 1/Layer 2 record | Real | — | both | per-cell |
 | TA / PUSCH-TA / PUCCH-TA / SRS-TA | `cell_metrics_handler` | Real | ns (converted) | UL | per-UE |
 | PHR | `cell_metrics_handler::handle_ul_phr_indication` | Real | dB | UL | per-UE |
@@ -252,10 +271,16 @@ per-TDD-slot PRB usage).
   metrics with DU-manager-held QoS config *outside* the scheduler, at the metrics-consumption layer (JSON/E2
   generator), keyed by `ue_index`, which is already common to both sides. Not implemented here: it's a
   cross-layer join, not a scheduler instrumentation gap, and deserves its own design pass.
-- **Per-grant UL telemetry (Layer 2)**: the header of `scheduler_ue_state_logger.h` documents this as scope for a
-  future iteration — the UL-side equivalent (`sched_result.ul.puschs`, `ul_harq_process_handle`) follows the
-  identical pattern used for DL and was intentionally left out of this iteration to keep the first version
-  reviewable.
+- ~~**Per-grant UL telemetry (Layer 2)**~~ - **done.** A parallel `"ul_grants"` array (mirroring `"dl_grants"`
+  field-for-field: RNTI, HARQ id, MCS, RB allocation, retransmission count, live PUSCH SINR/RSRP, HARQ
+  max-retx/waiting-ack, RAN slice id) was added to `scheduler_ue_state_logger.cpp`, sourced from
+  `sched_result.ul.puschs` and `ue_cell::harqs.ul_harq()`, following the identical pattern used for DL. One
+  field does *not* have a UL equivalent: DL grants carry `dl_buffer_occupancy_bytes` straight from
+  `sched_result`, but there is no analogous live pending-UL-bytes field on `ul_sched_info` - the closest
+  accessor, `ue::pending_ul_newtx_bytes()`, lives on the scheduler's `ue` object, not on the `ue_cell` this
+  component currently has access to via `ue_cell_scheduler::find_ue_cell()`. Rather than add a new
+  cross-layer accessor for one field, it's simply omitted from `ul_grants` entries for now, consistent with
+  this component's "only emit a field when real data exists" principle.
 - **Pre-trim required RBs/MCS vs. final allocation** (the OAI reference's `rbs_req/mcs_req` vs. `rbs_out/mcs_out`
   distinction, i.e. what link adaptation *asked for* before PRB availability trimmed it down). srsRAN's link
   adaptation / grant sizing happens inside `lib/scheduler/policy/scheduler_time_qos.cpp` and
@@ -266,8 +291,20 @@ per-TDD-slot PRB usage).
   here — it requires touching core allocation logic, which is exactly the kind of "avoid touching production
   scheduler logic unless clearly justified" trade-off called out in the task; documented as the next step rather
   than done speculatively.
-- **UL HARQ id / retx count / RB allocation at grant level** — same pattern as DL, just not implemented yet (see
-  above).
+- ~~**UL HARQ id / retx count / RB allocation at grant level**~~ - **done**, as part of the Layer 2 UL grants
+  addition above.
+- **UL HOL/queueing delay, and UL delay-based scheduler prioritization** — deliberately *not* pursued as a
+  literal port of the DL `dl_hol_delay_ms` fix. See §14.3's closing note for why: the gNB has no timestamp of
+  when a UL SDU arrived at the UE's RLC (unlike DL, where the gNB's own RLC Tx entity produces that
+  timestamp), so there is no `rlc_buffer_state`-equivalent event to plumb through for UL. The closest real,
+  already-instrumented proxy is SR-to-PUSCH-grant turnaround delay (`avg_sr_to_pusch_delay`/
+  `max_sr_to_pusch_delay`, already in `cell_metrics_handler` and already flowing to InfluxDB) - coarser than
+  true per-packet HOL delay, but real, not fabricated. Building genuine UL queueing-delay measurement would
+  require new UE-side signaling that doesn't exist today, and wiring it into
+  `scheduler_time_qos.cpp::compute_ul_qos_weights()` (which currently hard-codes its delay-weight argument to
+  `1.0` - confirmed no UL delay term exists even in stub form) would be a live UL scheduling-behavior change,
+  not a telemetry gap. Left as a deferred, separate, higher-risk item - the same category of decision as the
+  DL clock-mismatch fix was originally treated as.
 
 ## 10. Mapping to a real near-RT RIC / xApp architecture
 
@@ -379,10 +416,13 @@ The gNB's E2 node ID can be found via the E2 Manager's REST API: `curl http://<e
 
 ## 13. Known limitations and next steps
 
-- Layer 2 is single-pipe, single-consumer, best-effort, DL-only, and has no schema versioning beyond the
-  `"schema":"srsran_ue_state_v1"` tag — treat it as a development tool, not an API contract.
-- 5QI/QoS-flow tagging, UL-side per-grant telemetry, and pre-trim link-adaptation values are documented gaps (§9),
-  not implemented.
+- Layer 2 is single-pipe, single-consumer, best-effort (now covering both DL and UL grants, see §6/§9), and has
+  no schema versioning beyond the `"schema":"srsran_ue_state_v1"` tag — treat it as a development tool, not an
+  API contract.
+- 5QI/QoS-flow tagging, pre-trim link-adaptation values, and true UL queueing-delay measurement remain
+  documented gaps (§9), not implemented - UL per-grant telemetry itself (RNTI, HARQ id, MCS, RB allocation,
+  retx count, PUSCH SINR/RSRP, HARQ state) is now implemented; see §9 for exactly which UL fields still have
+  no data source and why.
 - No E2SM extension was added for the new `dl_hol_delay_ms` field or for any Layer 2 field; both remain
   accessible only via JSON/pipe until a near-RT RIC needs them over E2. The pre-existing srsRAN gap that
   previously kept it unpopulated end-to-end (§14.3) has since been fixed and **live-validated** - `dl_hol_delay_ms`
@@ -399,6 +439,16 @@ The gNB's E2 node ID can be found via the E2 Manager's REST API: `curl http://<e
 - TX/RX gain control (`ru_gain_controller`) is real, live, non-Enterprise-gated srsRAN functionality, but is not
   yet exposed over E2SM-RC (only via the gNB's interactive stdin console) - see §14.2 for why we didn't pursue it
   as the next control action.
+- **Future work: validate HOL-delay-based UE prioritization in a multi-UE scenario.** The §14.3 fix makes
+  `scheduler_time_qos.cpp`'s delay-weighted prioritization term (`delay_weight += hol_delay_ms / pdb`, keyed by
+  each bearer's `packet_delay_budget_ms`) receive real, non-zero data for the first time - but this was only
+  validated with a single attached UE, where there's no other UE to prioritize *against*. Not yet checked:
+  attach 2+ UEs with QoS policies configured (differing `packet_delay_budget_ms`, or one UE with a much larger
+  DL buffer backlog than the other), saturate DL on more than one simultaneously, and confirm via the gNB log
+  (`SCHED` slot-decision lines already show `dl_bo`) and/or per-UE `dl_hol_delay_ms`/`dl_brate` in InfluxDB that
+  the scheduler measurably favors the UE with the larger delay-weight term - i.e. that the fix changes *grant
+  allocation order/share*, not just the *telemetry value*. This is the natural next validation step before
+  relying on this fix for any SLA/QoS-sensitive multi-user scenario.
 
 ## 14. Control: implemented and validated E2SM-RC extensions
 
@@ -526,7 +576,16 @@ reads from the same now-populated `hol_toa`, this fix also activates a previousl
 UEs with QoS policies configured (`packet_delay_budget_ms`) will now actually be delay-prioritized against each
 other under contention, where before this term was always zero. This is presumably the intended effect of fixing
 the gap, but it is a live scheduling-behavior change, not a metrics-only fix - worth watching for during
-multi-UE contention testing.
+multi-UE contention testing. See §13's "Future work" entry for the specific multi-UE experiment to run to
+confirm this prioritization is actually taking effect, not just that the underlying metric is now populated.
+
+**Scope note: this fix is DL-only, deliberately.** UL has no equivalent gap to fix, because it has no
+equivalent *data source*: `hol_toa` exists for DL because the gNB's own RLC Tx entity timestamps SDU
+arrival for data it is about to transmit. For UL, the SDU lives in the UE's buffer until the gNB grants it -
+the gNB never observes a UL SDU's arrival time, so there is nothing analogous to copy through. See §9's UL
+HOL-delay bullet for the practical proxy that already exists (SR-to-PUSCH turnaround delay) and why building
+genuine UL queueing-delay measurement is a separate, deferred, higher-risk piece of work, not a follow-on to
+this fix.
 
 ### 14.4 New control action: UE bitrate cap (throughput cap)
 
@@ -635,3 +694,17 @@ constraint from the start (§14.4 "Design"), not a retrofit.
 | `lib/e2/common/e2_du_factory.cpp` | modified |
 | `~/oran-sc-ric/xApps/python/lib/e2sm_rc_module.py` | modified (separate repo) |
 | `~/oran-sc-ric/xApps/python/simple_bitrate_cap_xapp.py` | new (separate repo) |
+
+## 16. Files changed (UL extension, this session)
+
+Extends the Layer 2 telemetry (§6) to UL grants and exercises the already-built UL bitrate cap (§14.4) via the
+demo xApp for the first time. No scheduler/E2SM-RC changes were needed - both were already direction-agnostic
+(§14.4's "Real-hardware / COTS UE compatibility" note applies equally here: UL enforcement has zero new RF or
+platform dependency either).
+
+| File | Status |
+|---|---|
+| `lib/scheduler/logging/scheduler_ue_state_logger.h` | modified (doc comment + scope) |
+| `lib/scheduler/logging/scheduler_ue_state_logger.cpp` | modified (new `ul_grants` array) |
+| `~/oran-sc-ric/xApps/python/simple_bitrate_cap_xapp.py` | modified (separate repo - now cycles `max_ul_kbps` alongside `max_dl_kbps`) |
+| `agentic_ran/patches/new_files_oran_sc_ric/xApps/python/simple_bitrate_cap_xapp.py` | modified (reproducibility copy, kept in sync) |

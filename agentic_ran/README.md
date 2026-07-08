@@ -39,9 +39,13 @@ for the full technical explanation.
 3. Live validation that srsRAN's existing PRB-quota E2SM-RC control action works end-to-end against a real
    near-RT RIC (nothing to build here - proof, not new code).
 4. A new E2SM-RC control action (Style 2, vendor action ID 201) plus a from-scratch token-bucket scheduler
-   mechanism enforcing a direct per-UE DL/UL bitrate cap, validated live with a repeatable throughput staircase
-   matching requested targets within ~1-6%.
-5. A demonstration xApp exercising the new action, plus the necessary xApp-SDK-side wire-format support.
+   mechanism enforcing a direct per-UE DL/UL bitrate cap. The DL direction was validated live with a
+   repeatable throughput staircase matching requested targets within ~1-6%; the UL direction used the
+   identical, direction-agnostic enforcement path but was not exercised by the demo xApp until a later
+   session - see the design doc's UL extension note (top of file) for current live-validation status.
+5. A demonstration xApp exercising the new action (now cycling both `max_dl_kbps` and `max_ul_kbps`), plus
+   the necessary xApp-SDK-side wire-format support. A native srsRAN per-grant UL telemetry extension
+   (`"ul_grants"`, mirroring the existing `"dl_grants"`) was added in the same later session.
 
 ## B. Architecture
 
@@ -292,8 +296,9 @@ results in the audit document §A.1/§C.8).
 |---|---|---|
 | **Baseline, no xApp** | No control xApp running | `dl_brate` limited only by radio conditions/PRB availability - this is the reference throughput to compare all other scenarios against |
 | **PRB quota xApp enabled** (pre-existing feature, good sanity check) | Run `simple_rc_xapp.py` | `dl_brate` steps with the PRB ratio, but the *exact* achieved value depends on current MCS/CQI, not just the ratio |
-| **Bitrate cap xApp enabled** (new) | Run `simple_bitrate_cap_xapp.py` | `dl_brate` steps to match the requested kbps directly, largely independent of MCS/CQI (see §14.4 results) |
-| **Traffic variation** | Vary `iperf3` bandwidth/protocol (TCP vs UDP), or light (`ping`) vs. saturating traffic | With no traffic queued, `dl_bs`/`dl_hol_delay_ms` should be absent (not zero); under saturation, `dl_bs` should be consistently non-zero |
+| **Bitrate cap xApp enabled** (new) | Run `simple_bitrate_cap_xapp.py` | `dl_brate`/`ul_brate` both step to match the requested `max_dl_kbps`/`max_ul_kbps`, largely independent of MCS/CQI (see §14.4 results; the xApp now cycles both directions together) |
+| **UL traffic / UL telemetry** (new) | Generate UL traffic (non-reverse `iperf3` from the UE, or bidirectional), with `SRSRAN_UE_STATE_PIPE` set | Layer 2 pipe output now includes a populated `"ul_grants"` array (RNTI, HARQ id, MCS, RB allocation, retx count, PUSCH SINR/RSRP, HARQ state) alongside `"dl_grants"` - see the design doc §6/§7 |
+| **Traffic variation** | Vary `iperf3` bandwidth/protocol (TCP vs UDP), or light (`ping`) vs. saturating traffic | With no traffic queued, `dl_bs`/`dl_hol_delay_ms` should be absent (not zero); under saturation, `dl_bs` should be consistently non-zero. There is no UL equivalent of `dl_hol_delay_ms` - the closest UL signal is `avg_sr_to_pusch_delay`/`max_sr_to_pusch_delay` (see design doc §9/§14.3) |
 | **PRB variation** | Combine PRB-quota and bitrate-cap xApps on the same UE | Achieved rate should track the *lower* of what the PRB quota permits and the explicit kbps cap (see Use Case E.4) - note the full-replace caveat (§C.9): both must be sent together |
 | **Congestion scenario** | Multiple UEs, all saturating | Confirm per-UE caps are enforced independently; no cross-UE interference from the token bucket (it's per-UE state) |
 | **Control action scenario** | Toggle the cap on/off (`max_dl_kbps=None` is rejected by the xApp SDK - re-send a PRB-quota-only or very high cap to effectively lift it) | Achieved rate should return to the uncapped ceiling within one report interval |
