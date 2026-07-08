@@ -225,17 +225,38 @@ here.)
 
 ## 9. Future work
 
-- Implement the remaining RAN parameters (GFBR, Packet Delay Budget/Error Rate, ARP, QoS monitoring) for full
-  Style 1/Action 1 coverage.
-- Enforce GFBR as an actual scheduling-priority floor, not just a soft QoS-weighting signal.
+### Priority recommendation
+
+Of everything below, three items matter most, in this order — the rest are worth doing eventually but are
+lower research value per hour spent (mostly "should just work" engineering validation, not open questions):
+
+1. **Validate the multi-UE UL LCG-sharing scenario.** This is the one claim in the whole feature that is
+   currently purely analytical: §3/§C predicts (from TS 38.321) that UL enforcement degrades to an LCG-aggregate
+   cap when a GBR DRB shares its LCG with another logical channel, but this was never actually attached and
+   observed with two UEs. It is also the cheapest open item to close — no new hardware required, just a second
+   UE profile and either a multi-port ZMQ RF config or two RF chains — and it directly converts the one part of
+   this contribution that currently rests on "trust the spec reading" into a measured result.
+2. **Fix the Open5GS PCC-rule gap (§8) and re-validate the three bug fixes (§11) via the *standard* NGAP path.**
+   Everything measured in this work went through the RIC-control trigger only. The claim that "a real
+   AMF/PCF-driven QoS modification would hit the same three bugs identically" is architecturally sound (shared
+   code, traced call graph) but was never actually exercised live end-to-end. Closing this gap would make the
+   bug-fix story fully empirical rather than partly inferred.
+3. **Enforce GFBR as a real scheduling floor**, not just a soft QoS-weighting signal. This is what turns the
+   feature from "an MFBR cap" into genuine GBR bearer support — the more complete, more upstreamable version of
+   what exists today.
+
+### Remaining items
+
+- Implement the remaining RAN parameters (GFBR IEs themselves, Packet Delay Budget/Error Rate, ARP, QoS
+  monitoring) for full Style 1/Action 1 coverage.
 - Support dynamic 5QI end-to-end.
 - Make the E2SM-RC response carry real completion status (await the RRC/F1AP/E1AP round trip before ACKing, or
   add a follow-up INDICATION/notification once it completes) instead of fire-and-forget.
-- Validate on real SDR + COTS UE hardware, and with a multi-UE, multi-port ZMQ (or real RF) testbed to exercise
-  genuine LCG-sharing contention scenarios end-to-end (§13's open question).
+- Validate on real SDR + COTS UE hardware and a split DU/CU deployment (§12/§13's other open questions) — both
+  expected to work unchanged architecturally, but not empirically confirmed.
 - Upstream the three RRC/F1AP bugs (§11) to the srsRAN project independently of this feature.
-- Provision a real PCC-rule/PCF policy path in Open5GS (or switch to a PCF that supports dynamic policy) so the
-  standard NGAP-driven trigger path can also be exercised live, not just the RIC-control one.
+- Implement Style 1/Action 1 on OpenAirInterface's E2 agent (confirmed absent today — it only registers Style
+  1/Action 2) for genuine multi-vendor interoperability testing.
 - Extend `contains_values()`'s apparent inverted-boolean-logic quirk (flagged, not fixed, in the companion doc)
   — worth a dedicated, separate investigation.
 
