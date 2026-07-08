@@ -81,6 +81,15 @@ public:
   /// in a UL HARQ.
   unsigned pending_ul_newtx_bytes() const;
 
+  /// \brief UE-wide (not slice-scoped) UL pending bytes, with each LCG's contribution clamped by that LCG's
+  /// remaining MFBR budget for \c sl_tx, if configured. Intended to be used as an additional, conservative ceiling
+  /// alongside \ref pending_ul_newtx_bytes() at grant-sizing time - the same role the existing UE-aggregate
+  /// bitrate cap already plays there - not as a replacement for it.
+  unsigned pending_ul_newtx_bytes_mfbr_capped(slot_point sl_tx) const
+  {
+    return u.logical_channels().ul_pending_bytes_mfbr_capped(sl_tx);
+  }
+
   /// \brief Computes the number of UL bytes that are yet to be received by the scheduler. This includes the UL bytes
   /// of grants not yet scheduled and the UL bytes of already scheduled grants whose CRC has not reached the scheduled.
   unsigned pending_ul_unacked_bytes(lcg_id_t lcg_id) const

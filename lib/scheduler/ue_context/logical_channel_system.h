@@ -24,6 +24,7 @@
 
 #include "../config/logical_channel_list_config.h"
 #include "../slicing/ran_slice_id.h"
+#include "../support/ue_bitrate_limiter.h"
 #include "srsran/adt/soa_table.h"
 #include "srsran/adt/static_flat_map.h"
 #include "srsran/mac/mac_pdu_format.h"
@@ -129,6 +130,11 @@ private:
     std::optional<soa::row_id> qos_row;
     /// Slice associated with this channel.
     std::optional<ran_slice_id_t> slice_id;
+    /// \brief Enforces the DRB's Maximum Flow Bit Rate (MFBR) in the DL, if the channel is a GBR flow with a
+    /// configured MFBR. No-op (uncapped) otherwise. See \ref logical_channel_system::configure() for how this is
+    /// populated from \c gbr_qos_flow_information::max_br_dl, and \ref logical_channel_system::allocate_mac_sdu()
+    /// for where it is enforced.
+    ue_bitrate_limiter mbr_limiter;
 
     // Note: clang 18.1.3 std::is_constructible_v<channel_context> return false without this.
     dl_logical_channel_context() noexcept = default;
@@ -145,6 +151,14 @@ private:
     std::optional<soa::row_id> qos_row;
     /// Slice associated with this channel.
     std::optional<ran_slice_id_t> slice_id;
+    /// \brief Enforces the Maximum Flow Bit Rate (MFBR) in the UL for this LCG, if it carries a single GBR DRB
+    /// with a configured MFBR. No-op (uncapped) otherwise.
+    /// \remark Unlike the DL, UL Logical Channel Prioritization is performed by the UE, not the gNB (TS 38.321) -
+    /// the gNB can only shape the *LCG's* total granted UL bytes, not a specific DRB's share within a shared LCG.
+    /// This limiter therefore only produces an exact per-DRB cap when the GBR DRB has an LCG to itself (the
+    /// recommended configuration for GBR bearers); if the LCG is shared with other logical channels, it correctly
+    /// degrades to capping the whole LCG's aggregate rate rather than silently misattributing the cap.
+    ue_bitrate_limiter mbr_limiter;
   };
   /// UE context relative to its configuration.
   struct ue_config_context {
@@ -209,8 +223,10 @@ private:
   bool handle_mac_ce_indication(soa::row_id ue_row_id, const mac_ce_info& ce);
   void handle_bsr_indication(soa::row_id ue_row_id, const ul_bsr_indication_message& bsr);
 
-  unsigned allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& subpdu, lcid_t lcid, unsigned rem_bytes);
-  unsigned allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& lch_info, unsigned rem_bytes, lcid_t lcid);
+  unsigned
+  allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& subpdu, lcid_t lcid, unsigned rem_bytes, slot_point sl_tx);
+  unsigned
+  allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& lch_info, unsigned rem_bytes, lcid_t lcid, slot_point sl_tx);
   unsigned allocate_mac_ce(soa::row_id ue_rid, dl_msg_lc_info& lch_info, unsigned rem_bytes);
   unsigned allocate_ue_con_res_id_mac_ce(soa::row_id ue_rid, dl_msg_lc_info& lch_info, unsigned rem_bytes);
 
@@ -527,6 +543,11 @@ public:
   /// \brief Calculates number of UL pending bytes, including MAC header overhead, and taking UE state into account.
   unsigned ul_pending_bytes() const;
 
+  /// \brief Calculates number of UL pending bytes as in \ref ul_pending_bytes(), but with each LCG's contribution
+  /// additionally clamped by that LCG's remaining MFBR budget for \c sl_tx, if a cap is configured (see
+  /// \c ul_logical_channel_group_context::mbr_limiter). No-op for LCGs without a configured MFBR.
+  unsigned ul_pending_bytes_mfbr_capped(slot_point sl_tx) const;
+
   /// Calculates the number of DL pending bytes, including MAC header overhead, for a RAN slice.
   unsigned dl_pending_bytes(ran_slice_id_t slice_id) const
   {
@@ -616,8 +637,11 @@ public:
 
   /// \brief Allocates highest priority MAC SDU within space of \c rem_bytes bytes. Updates \c lch_info with allocated
   /// bytes for the MAC SDU (no MAC subheader).
+  /// \param[in] sl_tx Slot on which the resulting PDSCH grant will be transmitted, used to enforce the LC's MFBR
+  /// (DRBs only; a default-constructed \c slot_point is safe for SRBs, which are never MFBR-capped).
   /// \return Allocated bytes for MAC SDU (with subheader).
-  unsigned allocate_mac_sdu(dl_msg_lc_info& lch_info, unsigned rem_bytes, lcid_t lcid = INVALID_LCID);
+  unsigned
+  allocate_mac_sdu(dl_msg_lc_info& lch_info, unsigned rem_bytes, slot_point sl_tx, lcid_t lcid = INVALID_LCID);
 
   /// \brief Allocates next MAC CE within space of \c rem_bytes bytes. Updates \c lch_info with allocated bytes for the
   /// MAC CE.
@@ -632,8 +656,10 @@ public:
 
   /// \brief Register the scheduling of an UL grant for this UE.
   ///
-  /// This event will be used to update estimated bit rates.
-  void handle_ul_grant(unsigned grant_size);
+  /// This event will be used to update estimated bit rates, and to deduct the granted bytes from each
+  /// GBR-tracked LCG's MFBR budget (see \c ul_logical_channel_group_context::mbr_limiter).
+  /// \param[in] sl_tx Slot on which the grant was transmitted.
+  void handle_ul_grant(unsigned grant_size, slot_point sl_tx);
 
   /// Clear SR indication pending flag.
   void reset_sr_indication();
@@ -659,12 +685,15 @@ private:
 /// \param[in] tb_info TB on which MAC subPDUs will be stored.
 /// \param[in] lch_mng UE DL logical channel manager.
 /// \param[in] total_tbs available space in bytes for subPDUs.
+/// \param[in] sl_tx Slot on which the resulting PDSCH grant will be transmitted, used to enforce a DRB's MFBR, if
+/// configured. Only relevant for DRBs; ignored (no MFBR is ever configured) for SRBs.
 /// \param[in] lcid if provided, LCID of the logical channel to be allocated. Otherwise, the LCID with higher priority
 /// is chosen.
 /// \return Total number of bytes allocated (including MAC subheaders).
 unsigned allocate_mac_sdus(dl_msg_tb_info&                tb_info,
                            ue_logical_channel_repository& lch_mng,
                            unsigned                       total_tbs,
+                           slot_point                     sl_tx,
                            lcid_t                         lcid = INVALID_LCID);
 
 /// \brief Allocate MAC subPDUs for pending MAC CEs.
@@ -695,9 +724,11 @@ unsigned build_dl_fallback_transport_block_info(dl_msg_tb_info&                t
 /// given RAN slice.
 /// \return Returns the number of bytes reserved in the TB for subPDUs (other than padding).
 /// \remark Excludes SRB0, as this operation is specific to a given RAN slice.
+/// \param[in] sl_tx Slot on which the resulting PDSCH grant will be transmitted, used to enforce a DRB's MFBR.
 unsigned build_dl_transport_block_info(dl_msg_tb_info&                tb_info,
                                        ue_logical_channel_repository& lch_mng,
                                        unsigned                       tb_size_bytes,
-                                       ran_slice_id_t                 slice_id);
+                                       ran_slice_id_t                 slice_id,
+                                       slot_point                     sl_tx);
 
 } // namespace srsran

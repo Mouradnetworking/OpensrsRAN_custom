@@ -562,8 +562,58 @@ pdu_session_manager_impl::modify_pdu_session(const e1ap_pdu_session_res_to_modif
 
     // Apply QoS flows
     for (auto& qos_flow_info : drb_to_mod.flow_map_info) {
-      // TODO
-      logger.log_warning("Unsupported modification of QoS flow for {}", qos_flow_info.qos_flow_id);
+      qos_flow_setup_result flow_result = {};
+      flow_result.success               = false;
+      flow_result.cause                 = e1ap_cause_radio_network_t::unspecified;
+      flow_result.qos_flow_id           = qos_flow_info.qos_flow_id;
+
+      five_qi_t new_five_qi = qos_flow_info.qos_flow_level_qos_params.qos_desc.get_5qi();
+      if (qos_cfg.find(new_five_qi) == qos_cfg.end()) {
+        flow_result.cause = e1ap_cause_radio_network_t::not_supported_5qi_value;
+        logger.log_error("Cannot modify {} of {}: unsupported {}", qos_flow_info.qos_flow_id, drb_to_mod.drb_id, new_five_qi);
+        drb_result.qos_flow_results.push_back(flow_result);
+        continue;
+      }
+
+      auto flow_iter = drb->qos_flows.find(qos_flow_info.qos_flow_id);
+      if (flow_iter != drb->qos_flows.end()) {
+        // Existing flow. The DU-side scheduler (not the CU-UP) enforces GBR/MFBR limits, driven by the
+        // F1AP UE Context Modification triggered on the CU-CP side of this same NGAP-originated procedure;
+        // here we only need to keep the CU-UP's 5QI bookkeeping (e.g. F1-U DSCP marking) consistent.
+        if (flow_iter->second->five_qi != new_five_qi) {
+          logger.log_info("Updating {} of {}: five_qi {} -> {}",
+                          qos_flow_info.qos_flow_id,
+                          drb_to_mod.drb_id,
+                          flow_iter->second->five_qi,
+                          new_five_qi);
+          flow_iter->second->five_qi = new_five_qi;
+        }
+        flow_result.success = true;
+      } else if (not pdu_session->sdap->is_mapped(qos_flow_info.qos_flow_id)) {
+        // New QoS flow mapped onto an already-established DRB.
+        if (not drb_to_mod.sdap_cfg.has_value()) {
+          flow_result.cause = e1ap_cause_radio_network_t::unspecified;
+          logger.log_error(
+              "Cannot map new {} onto {}: no SDAP config provided", qos_flow_info.qos_flow_id, drb_to_mod.drb_id);
+          drb_result.qos_flow_results.push_back(flow_result);
+          continue;
+        }
+        drb->qos_flows[qos_flow_info.qos_flow_id] = std::make_unique<qos_flow_context>(qos_flow_info);
+        auto& new_qos_flow                        = drb->qos_flows[qos_flow_info.qos_flow_id];
+        logger.log_debug("Created QoS flow with {} and {}", new_qos_flow->qos_flow_id, new_qos_flow->five_qi);
+        sdap_config sdap_cfg = make_sdap_drb_config(drb_to_mod.sdap_cfg.value());
+        pdu_session->sdap->add_mapping(
+            qos_flow_info.qos_flow_id, drb_to_mod.drb_id, sdap_cfg, new_qos_flow->sdap_to_pdcp_adapter);
+        new_qos_flow->sdap_to_pdcp_adapter.connect_pdcp(drb->pdcp->get_tx_upper_data_interface());
+        flow_result.success = true;
+      } else {
+        flow_result.cause = e1ap_cause_radio_network_t::multiple_qos_flow_id_instances;
+        logger.log_error("Cannot map {} onto {}: already mapped to a different DRB",
+                         qos_flow_info.qos_flow_id,
+                         drb_to_mod.drb_id);
+      }
+
+      drb_result.qos_flow_results.push_back(flow_result);
     }
 
     // Add result

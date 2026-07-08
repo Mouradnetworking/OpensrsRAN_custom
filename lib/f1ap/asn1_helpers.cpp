@@ -523,6 +523,9 @@ f1ap_drb_to_modify srsran::make_drb_to_modify(const asn1::f1ap::drbs_to_be_modif
   f1ap_drb_to_modify drb_obj;
   drb_obj.drb_id            = uint_to_drb_id(drb_item.drb_id);
   drb_obj.uluptnl_info_list = make_ul_up_tnl_info_list(drb_item.ul_up_tnl_info_to_be_setup_list);
+  if (drb_item.qos_info_present) {
+    drb_obj.qos_info = drb_info_from_f1ap_asn1(drb_item.qos_info);
+  }
   return drb_obj;
 }
 
@@ -556,6 +559,10 @@ drbs_to_be_modified_item_s srsran::make_drb_to_mod(const f1ap_drb_to_modify& drb
   drbs_to_be_modified_item_s asn1type;
   asn1type.drb_id                          = drb_id_to_uint(drb_item.drb_id);
   asn1type.ul_up_tnl_info_to_be_setup_list = make_asn1_ul_up_tnl_info_list(drb_item.uluptnl_info_list);
+  if (drb_item.qos_info.has_value()) {
+    asn1type.qos_info_present = true;
+    asn1type.qos_info         = qos_info_to_f1ap_asn1(*drb_item.qos_info);
+  }
   return asn1type;
 }
 

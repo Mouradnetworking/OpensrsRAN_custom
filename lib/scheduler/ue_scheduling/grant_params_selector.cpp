@@ -438,7 +438,11 @@ static std::optional<ul_sched_context> get_ul_sched_context(const slice_ue&     
           compute_newtx_pusch_config_params(ue_cc, dci_type, pusch_td_res, uci_nof_harq_bits, is_csi_report_slot);
       // Throughput cap: clamp the newTx grant to the UE's configured UL bitrate budget for this slot. HARQ
       // retransmissions (the "else" branch below) are never throttled.
-      pending_bytes      = std::min(pending_bytes, ue_cc.ul_bitrate_limiter().get_max_grantable_bytes(pusch_slot));
+      pending_bytes = std::min(pending_bytes, ue_cc.ul_bitrate_limiter().get_max_grantable_bytes(pusch_slot));
+      // Per-DRB MFBR cap: additionally clamp by each LCG's own remaining MFBR budget, if configured (no-op
+      // otherwise). This only isolates a single GBR DRB's UL rate when that DRB has an LCG to itself - see
+      // ul_logical_channel_group_context::mbr_limiter's doc comment for why (UL LCP is UE-controlled, TS 38.321).
+      pending_bytes = std::min(pending_bytes, u.pending_ul_newtx_bytes_mfbr_capped(pusch_slot));
       auto mcs_prbs_sel = compute_newtx_required_mcs_and_prbs(pusch_cfg, ue_cc, pending_bytes, nof_rb_lims);
       if (not mcs_prbs_sel.has_value()) {
         return std::nullopt;

@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include "cu_cp_impl_interface.h"
 #include "ngap_repository.h"
 #include "ue_manager/ue_manager_impl.h"
 #include "srsran/cu_cp/cu_configurator.h"
@@ -34,8 +35,9 @@ public:
   cu_configurator_impl(srs_cu_cp::mobility_manager_cu_cp_notifier& mobility_notif_,
                        srs_cu_cp::du_processor_repository&         du_db_,
                        srs_cu_cp::ngap_repository&                 ngap_db_,
-                       srs_cu_cp::ue_manager&                      ue_mng_) :
-    mobility_notif(mobility_notif_), du_db(du_db_), ngap_db(ngap_db_), ue_mng(ue_mng_)
+                       srs_cu_cp::ue_manager&                      ue_mng_,
+                       srs_cu_cp::cu_cp_ngap_handler&               ngap_handler_) :
+    mobility_notif(mobility_notif_), du_db(du_db_), ngap_db(ngap_db_), ue_mng(ue_mng_), ngap_handler(ngap_handler_)
   {
   }
 
@@ -57,13 +59,18 @@ public:
   trigger_handover(const srs_cu_cp::du_index_t&                      source_du_index,
                    const srs_cu_cp::cu_cp_intra_cu_handover_request& handover_req) override;
 
+  async_task<bool> trigger_qos_flow_modification(const srs_cu_cp::ue_index_t&      ue_index,
+                                                 const cu_qos_flow_control_config& cfg) override;
+
 private:
   async_task<srs_cu_cp::cu_cp_intra_cu_handover_response> return_handover_response(bool ack);
+  async_task<bool>                                        return_qos_flow_modification_response(bool ack);
 
   srs_cu_cp::mobility_manager_cu_cp_notifier& mobility_notif;
   srs_cu_cp::du_processor_repository&         du_db;
   srs_cu_cp::ngap_repository&                 ngap_db;
   srs_cu_cp::ue_manager&                      ue_mng;
+  srs_cu_cp::cu_cp_ngap_handler&              ngap_handler;
 };
 
 } // namespace srsran

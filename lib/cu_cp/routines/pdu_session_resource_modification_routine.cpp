@@ -343,6 +343,29 @@ static bool update_modify_list_with_bearer_ctxt_mod_response(
       ue_context_mod_request.drbs_to_be_setup_mod_list.push_back(drb_setup_mod_item);
     }
 
+    // Add DRBs whose QoS was modified (e.g. a new MFBR) - as opposed to newly added above - to the UE context
+    // modification, so the DU/scheduler actually learns about the change. CU-UP already confirmed the
+    // modification via drb_modified_list_ng_ran; forward the corresponding QoS to the DU.
+    for (const auto& e1ap_drb_item : e1ap_item.drb_modified_list_ng_ran) {
+      const auto& drb_id = e1ap_drb_item.drb_id;
+      if (next_config.pdu_sessions_to_modify_list.at(psi).drb_to_modify.find(drb_id) ==
+          next_config.pdu_sessions_to_modify_list.at(psi).drb_to_modify.end()) {
+        logger.warning("{} not part of next configuration", drb_id);
+        return false;
+      }
+
+      const up_drb_context& next_drb_config =
+          next_config.pdu_sessions_to_modify_list.at(psi).drb_to_modify.at(drb_id);
+
+      f1ap_drb_to_modify drb_modify_item;
+      drb_modify_item.drb_id = drb_id;
+      drb_modify_item.qos_info.emplace();
+      drb_modify_item.qos_info->drb_qos = next_drb_config.qos_params;
+      drb_modify_item.qos_info->s_nssai = next_drb_config.s_nssai;
+
+      ue_context_mod_request.drbs_to_be_modified_list.push_back(drb_modify_item);
+    }
+
     // Add DRB to be removed to UE context modification.
     for (const auto& drb_id : next_config.pdu_sessions_to_modify_list.at(psi).drb_to_remove) {
       ue_context_mod_request.drbs_to_be_released_list.push_back(drb_id);

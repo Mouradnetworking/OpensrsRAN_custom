@@ -9,6 +9,13 @@
 >
 > For the full change audit, reproduction patches, novelty analysis, and use cases, see
 > [`AGENTIC_RAN_DEVELOPMENT_AUDIT.md`](./AGENTIC_RAN_DEVELOPMENT_AUDIT.md) in this same directory.
+>
+> A second, later control capability - standards-based per-DRB/per-QoS-flow GBR MFBR enforcement via the
+> standard E2SM-RC "DRB QoS Configuration" action (Style 1, Action 1), as opposed to this document's
+> UE-aggregate vendor bitrate cap (Style 2, Action 201) - is documented separately in
+> [`GBR_MFBR_QOS_ENFORCEMENT.md`](./GBR_MFBR_QOS_ENFORCEMENT.md) (standards positioning, UL Logical-Channel-Group
+> sharing limitation, and a 3-bug deep-dive) and [`DRB_QOS_XAPP_SYSTEM_DESIGN.md`](./DRB_QOS_XAPP_SYSTEM_DESIGN.md)
+> (system architecture, protocol propagation, use cases, and a from-scratch validation runbook).
 
 ## A. Project overview
 

@@ -151,6 +151,18 @@ bool srsran::srs_cu_cp::fill_rrc_reconfig_args(
     }
 
     for (const auto& drb_to_modify : pdu_session_to_add_mod.second.drb_to_modify) {
+      if (!reestablish_drbs && !drb_to_modify.second.pdcp_and_sdap_reconfig_required) {
+        // Nothing PDCP/SDAP-relevant changed for this DRB (e.g. a QoS-flow-parameter-only update, such as a
+        // new MFBR) - per TS 38.331, drb-ToAddModList only needs to list DRBs actually being added or
+        // modified, so the cleanest and most interoperable way to signal "no change" is to omit the entry
+        // entirely, rather than include a bare one with only drb-Identity set. A bare entry is technically
+        // spec-legal, but at least one UE implementation (srsUE) doesn't handle it gracefully at the RRC layer
+        // (its ADD/MOD radio bearer config application logic hits an unimplemented failure path when neither
+        // pdcp-Config nor reestablishPDCP is present), so omitting the entry avoids relying on UE-side support
+        // for an edge case that isn't universally implemented.
+        continue;
+      }
+
       rrc_drb_to_add_mod drb_to_add_mod;
       drb_to_add_mod.drb_id = drb_to_modify.first;
       if (reestablish_drbs) {

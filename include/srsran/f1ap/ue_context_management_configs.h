@@ -87,6 +87,10 @@ struct f1ap_drb_to_modify {
   drb_id_t drb_id = drb_id_t::invalid;
   /// UL Transport layer info for the given DRB. See ulUPTNLInformation-ToBeSetup-List in TS 38.473.
   std::vector<up_transport_layer_info> uluptnl_info_list;
+  /// \brief Updated QoS Information of the DRB, if this modification changes it (e.g. a new GBR QoS Flow
+  /// Information / MFBR for an E2SM-RC DRB QoS Configuration control action). \c nullopt if this modification
+  /// does not change the DRB's QoS (e.g. a plain RRC-Reestablishment UL-TNL reassignment).
+  std::optional<f1ap_drb_info> qos_info;
 };
 
 /// Parameters of a setup/modified DRB in the DU UE context.
