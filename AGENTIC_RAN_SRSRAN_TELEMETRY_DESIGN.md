@@ -384,10 +384,12 @@ The gNB's E2 node ID can be found via the E2 Manager's REST API: `curl http://<e
 - 5QI/QoS-flow tagging, UL-side per-grant telemetry, and pre-trim link-adaptation values are documented gaps (§9),
   not implemented.
 - No E2SM extension was added for the new `dl_hol_delay_ms` field or for any Layer 2 field; both remain
-  accessible only via JSON/pipe until a near-RT RIC needs them over E2. It also remains unpopulated end-to-end -
-  see §14.3 for the specific pre-existing srsRAN gap that blocks it, found during live validation.
+  accessible only via JSON/pipe until a near-RT RIC needs them over E2. The pre-existing srsRAN gap that
+  previously kept it unpopulated end-to-end (§14.3) has since been fixed and **live-validated** - `dl_hol_delay_ms`
+  now has a real, wired-through value confirmed in InfluxDB under DL saturation (§14.3).
 - The `scheduler_metrics_handler_test` unit test should be extended for the new field but this could not be
-  verified by running it in this environment (no GTest installed here, see §14.5).
+  verified by running it in this environment (`BUILD_TESTING=OFF`/no GTest installed here, see §14.5) - this
+  remains true after the §14.3 fix as well.
 - The UE bitrate cap (§14.4) is enforced with a 20 ms token-bucket burst window; this was chosen for
   responsiveness and validated live, but is a tunable, not a value derived from a spec or requirement.
 - UE bitrate cap requests and PRB-quota requests both fully replace the UE's `sched_ue_resource_alloc_config` on
@@ -449,7 +451,7 @@ target or a gain value, since building E2SM-RC plumbing to a dead end would be w
   pure scheduler-side logic with no RF dependency, and so is just as demonstrable on ZMQ as it will be on real
   hardware.
 
-### 14.3 A pre-existing srsRAN gap found via live validation: DL HOL delay never actually populates
+### 14.3 A pre-existing srsRAN gap found via live validation: DL HOL delay never actually populates - now fixed
 
 While validating `dl_hol_delay_ms` (§6, Layer 1) under a real 46 Mbps DL saturation test, `dl_bs` (DL buffer
 occupancy) was confirmed non-zero on every single InfluxDB sample, yet `dl_hol_delay_ms` never appeared even
@@ -460,11 +462,71 @@ where we'd made our change: `lib/du/du_high/du_manager/du_ue/du_ue_adapters.h`, 
 `// TODO: set hol_toa` and never copies the real `rlc_buffer_state::hol_toa` (correctly computed by
 `lib/rlc/rlc_tx_am_entity.cpp` etc.) into the MAC-layer message. This is a **pre-existing gap in srsRAN itself**,
 not introduced by this work, and it means `lib/scheduler/policy/scheduler_time_qos.cpp`'s HOL-delay-based UE
-prioritization is *also* silently a no-op in the real DU today, independent of any telemetry concerns. Not fixed
-here (see §9/§13): it spans two subsystems, needs a clock-type reconciliation
-(`steady_clock` in RLC vs. `system_clock` declared on the MAC message vs. `high_resolution_clock` used by the
-scheduler adapter's conversion function), and can change live scheduling behavior, so we treated it as a decision
-for the repo owner rather than a silent fix.
+prioritization is *also* silently a no-op in the real DU today, independent of any telemetry concerns. At the time
+this section was first written, it was deliberately left unfixed (see §9/§13, original wording below) since it
+spans two subsystems, needs a clock-type reconciliation, and can change live scheduling behavior - a decision we
+felt belonged to the repo owner rather than a silent fix:
+
+> "Not fixed here (see §9/§13): it spans two subsystems, needs a clock-type reconciliation (`steady_clock` in RLC
+> vs. `system_clock` declared on the MAC message vs. `high_resolution_clock` used by the scheduler adapter's
+> conversion function), and can change live scheduling behavior, so we treated it as a decision for the repo
+> owner rather than a silent fix."
+
+**Update: fixed, at the repo owner's request.** Two intertwined gaps were closed, plus a second silent drop point
+found while implementing the fix that this section's original investigation had missed:
+
+1. **The TODO itself** - `du_ue_adapters.h`'s `on_buffer_state_update()` now does `bs.hol_toa = rlc_bs.hol_toa;`
+   instead of dropping it.
+2. **The three-way clock mismatch**, resolved by standardizing on `steady_clock` throughout (rather than
+   converting into `system_clock`/`high_resolution_clock`), since `steady_clock` is what RLC already produces and
+   is the semantically correct choice for an elapsed-time measurement - unlike `system_clock` (wall-clock, can
+   jump backward on NTP adjustment). Changed: `mac_dl_buffer_state_indication_message::hol_toa`
+   (`include/srsran/mac/mac_ue_control_information_handler.h`) from `system_clock` to `steady_clock`; and in
+   `lib/mac/mac_sched/srsran_scheduler_adapter.{h,cpp}`, the `last_slot_tp` member and the `chrono_to_slot_point()`
+   helper's parameters, from `high_resolution_clock` to `steady_clock`.
+3. **A second, previously unidentified drop point** - `lib/mac/mac_dl/mac_cell_processor.cpp`'s
+   `update_logical_channel_dl_buffer_states()` also reconstructs a `mac_dl_buffer_state_indication_message` after
+   every DL grant (to refresh buffer state post-allocation), and its 3-arg aggregate initializer was likewise
+   omitting `hol_toa` even though the same `rlc_buffer_state` it reads `pending_bytes` from also carries the real
+   `hol_toa`. Fixed by explicitly setting `bs.hol_toa = rlc_bs.hol_toa;` after construction.
+
+No changes were needed downstream of the MAC boundary - `dl_buffer_state_indication_message`
+(`include/srsran/scheduler/scheduler_dl_buffer_state_indication_handler.h`) was already clock-free (`slot_point`),
+and every consumer from there on (`ue_event_manager.cpp`, `ue.cpp`, `logical_channel_system.{h,cpp}`,
+`slice_ue_repository.h`, `scheduler_time_qos.cpp`, `scheduler_metrics_handler.{h,cpp}`,
+`json_generators/du_high/scheduler.cpp`) was already correctly implemented, just starved of a valid input.
+
+`lib/du/du_high/test_mode/mac_test_mode_adapter.cpp`'s fake RLC has its own, separate `// TODO: set bs.hol_toa`
+(a synthetic RLC used only by `du_test_mode`, not the production bridge) - left as-is, since a fake RLC has no
+notion of a real arrival time to report; out of scope for this fix.
+
+**Verification status**: `srsran_mac` and `srsran_du_manager` rebuild clean, and the full `gnb` binary builds and
+links successfully.
+
+**Live-validated, post-fix**: re-ran the same DL-saturation setup as the original bug report (real UE attached
+over ZMQ, `iperf3` reverse-mode UDP saturating DL at ~43 Mbps requested / ~46 Mbps achieved) against a gNB running
+the rebuilt binary (confirmed via `md5sum` against the installed `/usr/local/bin/gnb` before restarting). Log
+confirmed a clean startup (`N2: Connection to AMF ... established`, `E2 Setup procedure successful`) and zero
+`[E]`/assert lines across the run. Querying InfluxDB directly:
+
+```sql
+SELECT time, dl_brate, dl_bs, dl_hol_delay_ms FROM ue ORDER BY time DESC LIMIT 5
+```
+
+`dl_hol_delay_ms` now populates on every sample (previously: present in the schema-on-write sense not at all,
+per §12 item 2) - typical values were 1 ms, with a 3 ms spike observed alongside a `dl_bs` bump to ~16 KB,
+tracking buffer occupancy as expected. Over a 60 s window: 56/57 samples at 1 ms, 1 sample at 3 ms - consistent,
+plausible values, not a fixed/fabricated constant. This testbed only had a single attached UE, so
+`scheduler_time_qos.cpp`'s delay-based *prioritization* (as opposed to the delay measurement itself) was not
+separately observed under multi-UE contention - see the behavioral note below for what to watch for once that's
+tested.
+
+**Behavioral note, not just telemetry**: since `scheduler_time_qos.cpp`'s HOL-delay-based UE prioritization weight
+reads from the same now-populated `hol_toa`, this fix also activates a previously-dormant scheduling behavior -
+UEs with QoS policies configured (`packet_delay_budget_ms`) will now actually be delay-prioritized against each
+other under contention, where before this term was always zero. This is presumably the intended effect of fixing
+the gap, but it is a live scheduling-behavior change, not a metrics-only fix - worth watching for during
+multi-UE contention testing.
 
 ### 14.4 New control action: UE bitrate cap (throughput cap)
 
