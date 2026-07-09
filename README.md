@@ -16,6 +16,21 @@ Community announcements and support - [Discussion board](https://www.github.com/
 
 Features and roadmap - [Features](https://docs.srsran.com/projects/project/en/latest/general/source/2_features_and_roadmap.html).
 
+> **This is a modified fork.** This repository is a fork of the official
+> [srsRAN Project](https://github.com/srsran/srsRAN_Project), maintained at
+> <https://github.com/Mouradnetworking/srsran>, extended (since July 2026) with per-slot/per-grant Layer 2
+> telemetry, a UE-aggregate bitrate-cap RIC control action, and a standards-compliant per-DRB GBR
+> Maximum-Flow-Bit-Rate enforcement mechanism exposed via a new O-RAN E2SM-RC control action ("DRB QoS
+> Configuration", Style 1/Action 1), together with three upstream srsRAN bugs found and fixed along the way.
+> Full technical documentation, protocol-level traces, and a byte-for-byte reproducible patch bundle (for
+> applying just these changes on top of a clean upstream checkout) are under [`agentic_ran/`](./agentic_ran/).
+>
+> **If you want vanilla, unmodified srsRAN**, use the official upstream repository instead:
+> <https://github.com/srsran/srsRAN_Project>.
+>
+> Like upstream, this fork is licensed under the **GNU Affero General Public License v3.0** (see
+> [`LICENSE`](./LICENSE)) — the modifications described above do not change the license terms in any way.
+
 Build Preparation
 -----------------
 
@@ -80,10 +95,10 @@ Download and build srsRAN:
 <details open>
 <summary><strong>Vanilla Installation</strong></summary>
 
-First, clone the srsRAN Project repository:
+First, clone this fork (see the note above if you want vanilla upstream srsRAN instead):
 
 ```bash
-    git clone https://github.com/srsRAN/srsRAN_Project.git
+    git clone https://github.com/Mouradnetworking/srsran.git srsRAN_Project
 ```
 
 Then build the code-base:
@@ -109,10 +124,12 @@ You can now run the gNB from ``srsRAN_Project/build/apps/gnb/``. If you wish to 
 
 Once ZMQ has been installed you will need build of srsRAN Project with the correct flags to enable the use of ZMQ.
 
-The following commands can be used to clone and build srsRAN Project from source. The relevant flags are added to the ``cmake`` command to enable the use of ZMQ:
+The following commands can be used to clone and build this fork from source (see the note near the top of this
+README if you want vanilla upstream srsRAN instead). The relevant flags are added to the ``cmake`` command to
+enable the use of ZMQ:
 
 ```bash
-git clone https://github.com/srsran/srsRAN_Project.git
+git clone https://github.com/Mouradnetworking/srsran.git srsRAN_Project
 cd srsRAN_Project
 mkdir build
 cd build
@@ -138,10 +155,11 @@ Pay extra attention to the cmake console output. Make sure you read the followin
 
 Once DPDK has been installed and configured you will need to create a clean build of srsRAN Project to enable the use of DPDK.
 
-If you have not done so already, download the code-base with the following command:
+If you have not done so already, download the code-base with the following command (see the note near the top
+of this README if you want vanilla upstream srsRAN instead):
 
 ```bash
-git clone https://github.com/srsRAN/srsRAN_Project.git
+git clone https://github.com/Mouradnetworking/srsran.git srsRAN_Project
 ```
 
 Then build the code-base, making sure to include the correct flags when running cmake:

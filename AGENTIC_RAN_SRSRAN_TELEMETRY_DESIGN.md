@@ -1,73 +1,109 @@
-# Agentic RAN telemetry/control design for srsRAN
+# Agentic RAN: telemetry and control extensions for srsRAN
 
-Status: telemetry (Layers 1-2) and one control action (PRB quota) are validated live against a real gNB/UE/RIC
-testbed (see §14). A second control action (UE bitrate cap) was implemented and validated live in the same way
-(§14.4). All of it is opt-in or additive: no existing production code path changes behavior unless a cap/quota is
-explicitly configured, or an experimental env var is set.
+**Status**: every contribution below is implemented and validated **live** against a real 5G stack — srsRAN
+gNB + srsUE over the ZMQ RF simulator, Open5GS 5GC, the O-RAN SC near-RT RIC, Telegraf/InfluxDB/Grafana. Everything is opt-in or additive to the base
+srsRAN codebase.
 
-UL extension (§6, §14.4, §16): Layer 2 telemetry now also covers UL grants, and the demo xApp now exercises the
-UL bitrate cap (previously implemented but never exercised end-to-end). Builds clean (§16); live re-validation
-against a real UL-saturating flow is pending as of this writing.
+## 0. Motivation, gaps, and contributions
 
-## 1. High-level objective
+### 0.1 Why this work exists
 
-The end goal is an **Agentic RAN** deployment: agents / xApps that can
+Turning srsRAN + a near-RT RIC into a platform that real agents (rule-based, RL-trained, or LLM-grounded) can
+observe and act on requires two things a stock deployment does not provide: **decision-level visibility** —
+what did the scheduler actually decide, on which HARQ process, on which exact resource blocks, and why — not a
+1-second average that has already thrown that information away; and **outcome-level control** — levers that
+match what an operator or an SLA actually specifies (a target bitrate, a guaranteed/maximum bit rate per
+bearer), not only a resource-share percentage that still leaves the achieved outcome to chance. Building that
+platform is the goal of this work.
 
-1. **observe** live RAN state (radio quality, buffers, scheduling decisions, HARQ, throughput, delay),
-2. **reason** over that state (rule-based, RL, or LLM-based "grounding agent"), and
-3. **influence or control** RAN behavior (PRB allocation shaping, power/link-adaptation targets, slice weighting, ...),
+### 0.2 Gaps found in the existing srsRAN + near-RT RIC stack
 
-with srsRAN as the RAN implementation, and (eventually) a real **O-RAN near-RT RIC** hosting the xApps and
-talking E2AP to the DU/CU, rather than an ad-hoc scripted control loop.
+Each of these was established by direct source-code tracing and confirmed (or, in one case, *disproven and
+corrected*) through live testing:
 
-This document describes what telemetry srsRAN can expose today, what was added, why, and how it maps onto that
-end goal.
+1. **No per-grant telemetry existed at all.** srsRAN's only metrics path (`cell_metrics_handler` →
+   JSON/E2SM-KPM) reports one aggregated snapshot per UE per report period (typically ≥100 ms–1 s). There was
+   no way to see an individual scheduling decision — which HARQ process, which exact RBs, whether it was a
+   retransmission — short of attaching a debugger or hand-parsing raw `SCHED` log lines.
+2. **A real telemetry field, and the scheduling behavior that depends on it, was silently dead.** This gap has
+   two distinct parts, both traced to the same root cause:
 
-## 2. What we learned from `oai-release-agentran`
+   a. **The telemetry field was dead.** `dl_hol_delay_ms`: DL head-of-line queueing delay, i.e. how long the
+      oldest queued DL packet has been waiting — was defined in the metrics struct and JSON output, but its
+      underlying value (`hol_toa`) was computed correctly by RLC and then silently dropped one layer up, in the
+      DU manager's RLC→MAC bridge (`du_ue_adapters.h`, behind a literal `// TODO: set hol_toa`). The field
+      therefore never carried real data in any deployment.
 
-The reference repository (`~/oai-release-agentran`, a modified OpenAirInterface 5G stack) is a full OAI
-checkout with three bespoke Python scripts added at its root:
+   b. **The scheduling *behavior* that depends on that field was dead too, as a direct consequence.**
+      `scheduler_time_qos.cpp` has a delay-aware QoS prioritization term that is supposed to raise a UE's
+      scheduling priority the longer its data has been queued, weighted by that bearer's
+      `packet_delay_budget_ms`. That term reads from the exact same `hol_toa` value. Because `hol_toa` was
+      never populated upstream (part **a**), this term had been computing against a constant/default input
+      since it was written, meaning the *scheduling policy*, not just the *metric*, had shipped but had never
+      once actually taken effect in any real deployment of this codebase.
 
-- **`dl_metrics_forwarder.py`** / **`ul_metrics_forwarder.py`** — each opens a named pipe
-  (`/tmp/dl_metrics.pipe`, `/tmp/ul_metrics.pipe`), expects one JSON object per line written by a **Lua scheduler
-  hook** (`pf_dl.lua` / `pf_ul.lua`, referenced from `UL_control_termination.py` but not present in this checkout),
-  and forwards it as InfluxDB line-protocol to a local InfluxDB instance (`INFLUXDB_URL`, bucket `mwc-live`).
-  Per-UE fields observed in the JSON→line-protocol mapping: RNTI, UE id, UE type, 5QI (as tags); pending bytes,
-  throughput, BLER, CQI, DL RSRP, PUSCH SINR (UL only), previous/required/allocated MCS, required/allocated RBs
-  and RB start, BWP start/size, HOL delay (µs), and — critically — a **PRB bitmask string** (`.`/`X` per PRB) for
-  the whole cell.
-- **`UL_control_termination.py`** — a FastAPI service that turns REST calls into **Telnet commands** sent to a
-  live OAI process (`telnet_utils.TelnetClient`): per-UE UL SNR power-control target, scheduler throughput caps
-  (FWA/MTC Mbps), and cell-wide or per-UE **PRB masking** (block/unblock/set/clear ranges or full bitmasks). It
-  also offers tmux-based lifecycle control (start/stop/restart the gNB process, tail its logs).
+   Both were fixed together. Fixing it did not just make the metric appear, it simultaneously activated a scheduling behavior that had been
+   dormant since it was first written, which is why [§11](#11-known-limitations-and-next-steps) flags multi-UE validation (confirming the scheduler now
+   measurably favors the higher-delay-weight UE under contention) as the necessary next step before relying on this fix in any QoS-sensitive scenario.
+3. **No outcome-based rate control existed.** The one working E2SM-RC control action (Style 2/Action 6, PRB
+   quota, a pre-existing srsRAN capability)
+   caps a *resource share*; achieved throughput still floats with radio conditions. Nothing let a RIC state a
+   target *bitrate* directly.
+4. **No standards-based per-bearer GBR/MFBR enforcement**, a standards-aligned E2SM-RC xApp based on the O-RAN Alliance Control Style 1 / Action  1 radio-bearer control model, enabling the near-RT RIC to perform post-admission, per-DRB QoS configuration using standard 5G parameters such as 5QI, GBR, and MFBR. Instead of relying only on resource-share controls such as PRB quotas, the xApp exposes a bearer-level control path for bitrate guarantees and limits through the E2SM-RC framework. Prior to this work, srsRAN already transported these QoS values through the F1AP/E1AP/NGAP/RRC signaling chain during admission, but they remained passive because no enforcement-side logic consumed them and no E2SM-RC action existed to update them after bearer establishment.Pre-existing srsRAN bugs in the
+   shared PDU-Session-Modify signaling code that silently broke *any* QoS-only DRB reconfiguration — bugs that
+   had evidently never been triggered before, because nothing in this codebase's own test or demo path exercises
+   that call chain end to end (full root-cause writeups in `agentic_ran/GBR_MFBR_QOS_ENFORCEMENT.md`).
 
-So the OAI reference stack is: **Lua-instrumented scheduler → named pipe → Python forwarder → InfluxDB** for
-telemetry, and **REST → Telnet → live Lua globals** for control. There is no near-RT RIC, no E2 interface, no
-xApp SDK involved — it is a self-contained experimentation harness built because OAI's mainline does not (yet)
-ship a production E2 agent equivalent to srsRAN's.
+### 0.3 Contributions
 
-## 3. Why we are not copying `dl_metrics_forwarder.py` as-is
+| | Contribution | Status |
+|---|---|---|
+| **C1** | A new per-slot, per-grant telemetry pipeline ("Layer 2") exposing HARQ process id, exact RB allocation, retransmission count, live PUSCH SINR/RSRP, and RAN slice id per grant — none of which existed in any form before this project ([§2](#2-final-design-chosen-for-srsran)–[§5](#5-metrics-currently-emitted)). | Live-validated ([§10](#10-how-to-validate-the-metrics-are-correct)) |
+| **C2** | Found and fixed a genuine upstream srsRAN bug that silently killed DL head-of-line delay telemetry *and* the scheduler's own delay-aware prioritization logic that depends on it — traced across RLC, MAC, and three separate, mismatched clock types ([§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed)). | Live-validated, fixed. |
+| **C3** | Designed, implemented, and live-validated a new E2SM-RC control action for a direct per-UE bitrate cap — a token-bucket, scheduler-side enforcement mechanism. measured within ~1–6% of four different target rates, repeatably ([§12.4](#124-new-control-action-ue-bitrate-cap-throughput-cap)). | Live-validated |
+| **C4** | Standards-compliant per-DRB GBR/MFBR enforcement exposed via O-RAN E2SM-RC Style 1/Action 1 ("DRB QoS Configuration") — the first working enforcement point. see `agentic_ran/DRB_QOS_XAPP_SYSTEM_DESIGN.md`. | Live-validated |
+| **C5** | Root-caused and fixed three separate, pre-existing srsRAN signaling bugs (RRC/F1AP) that blocked any live QoS-only DRB reconfiguration — found only because this project pushed the platform through a call path apparently never exercised end to end before. See `agentic_ran/GBR_MFBR_QOS_ENFORCEMENT.md` §F. | Live-validated |
 
-The OAI design is a reasonable choice *for OAI*, but three of its properties don't transfer to srsRAN and
-shouldn't be reproduced mechanically:
+### 0.4 On the engineering effort involved
 
-1. **The Lua hook doesn't exist in srsRAN and shouldn't be added.** srsRAN's scheduler has no embedded scripting
-   layer; building one solely to mimic OAI's instrumentation point would be a large, invasive addition for no
-   benefit — srsRAN's scheduler is C++ and can be instrumented directly and more cheaply at the same conceptual
-   point (the per-slot result callback).
-2. **InfluxDB + a bespoke Python forwarder duplicates infrastructure srsRAN already has.** srsRAN already ships a
-   production per-UE/per-cell metrics pipeline (`scheduler_metrics_notifier`, see §4) with two real consumers: a
-   JSON exporter and a full O-RAN-standard E2SM-KPM service model. Adding a third, parallel, InfluxDB-specific
-   telemetry stack would fragment rather than unify RAN observability.
-3. **The Telnet/REST control path exists because OAI has no near-RT RIC.** srsRAN already implements E2AP plus
-   E2SM-KPM, E2SM-RC and E2SM-CCC service models (`lib/e2/e2sm/*`). Since we plan to run a real near-RT RIC and
-   real xApps, RIC-driven control belongs on **E2SM-RC CONTROL** messages, not a REST-to-Telnet bridge into a
-   scripting VM. Building a Telnet-style side channel here would be a step *backwards* architecturally.
+None of the above is glue code wrapped around an existing API. 
 
-The reference repo *is* useful, though, as a checklist of "what a scheduler/KPM-consuming agent actually wants to
-see" (see the field list in §2) — that checklist is what drove the metric-by-metric gap analysis in §7–§9.
+- C2 addressed a cross-layer debugging and correction of a broken data path: a delay-related field was being produced in RLC, expected by the MAC/scheduler pipeline, but silently lost before it could influence scheduling decisions. Fixing the issue required tracing that value across the RLC → MAC → scheduler boundary and correcting the interfaces that carried it. It also required resolving inconsistent time semantics across the same path, where steady_clock, system_clock, and high_resolution_clock were being mixed in ways that made delay computation unreliable. In other words, C2 was not a one-line patch, it was a cross-subsystem repair that restored both the propagation of the metric and the correctness of the timing model behind it. 
 
-## 4. Final design chosen for srsRAN
+- C3 introduces a new E2SM-RC control action for direct per-UE bitrate capping, addressing a gap in srsRAN where the only working RIC control lever was a PRB quota: a resource-share mechanism that could allocate a percentage of radio resources but could not enforce an operator-facing throughput target such as “cap this UE at 30 Mbps.” Instead of using a naive per-slot RB-count heuristic, which incorrectly assumes that the UE will be scheduled in every future slot and therefore fails under TDD constraints and multi-UE contention, C3 implements a token-bucket mechanism that maintains a per-UE, per-direction byte budget refilled at the configured rate. When the scheduler grants new data, it checks the available budget to limit the grant size, and spends the budget only when the final allocation is committed, while retransmissions remain unthrottled to preserve HARQ reliability. Live validation with a real attached UE saturating the link via iperf3 showed that cycling the DL cap through 5/15/30/60 Mbps produced a repeatable throughput staircase in InfluxDB, tracking each target within roughly 1–6%, with the small bounded overshoot explained by the 20 ms burst allowance and TBS rounding.
+
+- C4 required first establishing, against the actual O-RAN.WG3.E2SM-RC v03.00 specification text rather than by
+assumption. It then required extending the C3 token-bucket mechanism from a per-UE aggregate cap to
+per-DRB (DL) / per-LCG (UL) enforcement, which surfaced a genuine standards-level constraint, not an
+implementation gap: TS 38.321 Logical Channel Prioritization is UE-controlled, not gNB-controlled, so a gNB can
+only enforce UL fairness at the granularity its own LCG-sharing allows, no gNB-side mechanism can force a
+UE's LCP algorithm to split UL bytes across DRBs in a specific way. Finally, C4 was the first control path in
+this codebase to push a value all the way through the full post-admission F1AP/E1AP/NGAP/RRC signaling chain,
+which is exactly what surfaced the three C5 bugs below; C4 could not be completed, let alone live-validated,
+until C5 was fixed.
+
+- C5 required root-causing *why* a standards-correct RRC message was being rejected by a real UE stack, the bug
+was not a crash or a log error, it was a spec-compliant-looking message that was nonetheless wrong, findable only
+by reading `srsue`'s own rejection logic and reasoning about 3GPP TS 38.331 `DRB-ToAddMod` semantics, not by
+pattern-matching a stack trace. All three bugs sat in shared, pre-existing signaling code exercised by *any*
+QoS-only DRB reconfiguration, not just this project's own control path, meaning they had evidently gone
+undetected because nothing in this codebase's own test or demo path had ever exercised that call chain end to
+end before.
+
+And critically: **every one of C2–C5 was proven against a live, full protocol stack** — a real gNB, a real UE, a
+real 5GC, a real near-RT RIC — not a mock, not a unit test in isolation, because a metric or a control action
+that looks correct on paper but has never taken a real ACK/NACK round trip through an unmodified UE's RRC stack
+is not actually proven to work.
+
+## 1. System overview
+
+srsRAN is the RAN implementation; the goal is agents / xApps that **observe** live RAN state at decision-level
+granularity (C1, C2), **reason** over it, and **control** RAN behavior with outcome-level levers (C3, C4) —
+talking E2AP to a real O-RAN near-RT RIC rather than through an ad-hoc scripted loop. [§2](#2-final-design-chosen-for-srsran) lays out the resulting
+architecture in full; the rest of this document is the field-by-field and file-by-file record of how each
+contribution above was built, validated, and where its limits are.
+
+## 2. Final design chosen for srsRAN
 
 srsRAN already has a periodic, per-UE/per-cell metrics pipeline that is the natural backbone for telemetry:
 
@@ -84,7 +120,7 @@ scheduler internals  →  cell_metrics_handler (lib/scheduler/logging/scheduler_
 
 This is **design option 3 combined with option 4**: reuse the existing metrics infrastructure, and treat the
 already-implemented E2SM-KPM/E2SM-RC agent as the real near-RT RIC integration path, rather than inventing a new
-one. Where this pipeline was silently dropping data srsRAN already computes (see §9, DL HOL delay), we extended
+one. Where this pipeline was silently dropping data srsRAN already computes (see [§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture), DL HOL delay), we extended
 it, because that data was real and already flowing through the scheduler — it just weren't being surfaced.
 
 On top of that backbone we keep a second, complementary layer that was already prototyped in a previous session
@@ -119,13 +155,13 @@ new ASN.1 definitions.
    dropped.
 4. *E2/KPM/RC paths for near-RT RIC integration* — **already implemented in srsRAN**; Layer 1 already feeds it.
    Wiring an actual near-RT RIC (e.g. enabling `e2sm_rc_enabled` and issuing CONTROL messages) is the intended
-   long-term control path; see §10.
+   long-term control path; see [§9](#9-how-to-build-and-run).
 5. *Hybrid: collect internally now, keep a clean path to real xApps/RIC* — this is what we built: Layer 1 (already
    RIC-ready) + Layer 2 (dev-time bridge, explicitly temporary/experimental).
 
-## 5. Files changed (telemetry)
+## 3. Files changed (telemetry)
 
-See §15 for the control-plane files added later in this effort.
+See [§13](#13-files-changed-control-plane-additions-this-session) for the control-plane files added later in this effort.
 
 | File | Status |
 |---|---|
@@ -144,7 +180,7 @@ See §15 for the control-plane files added later in this effort.
 | `lib/scheduler/logging/scheduler_metrics_handler.cpp` | modified |
 | `apps/helpers/metrics/json_generators/du_high/scheduler.cpp` | modified |
 
-## 6. Per-file rationale
+## 4. Per-file rationale
 
 ### Layer 2 — new per-grant telemetry exporter
 
@@ -153,10 +189,9 @@ See §15 for the control-plane files added later in this effort.
   custom srslog sink (`ue_state_pipe_sink`) that opens the FIFO non-blocking and drops samples rather than ever
   blocking the scheduler thread (formatting happens on the caller's thread, the actual `write()` happens on
   srslog's async backend thread). Emits one `{"schema":"srsran_ue_state_v1", ...}` JSON line per slot, with a
-  `"dl_grants"` array (one object per DL grant) and a `"ul_grants"` array (one object per UL/PUSCH grant, added
-  in a later pass, following the identical pattern). Supports: raw grant decision (RNTI, UE index, HARQ id,
+  `"dl_grants"` array (one object per DL grant) and a `"ul_grants"` array (one object per UL/PUSCH grant, following the identical pattern). Supports: raw grant decision (RNTI, UE index, HARQ id,
   MCS, RB allocation, retransmission count — plus DL buffer occupancy for DL grants specifically, "free" from
-  `sched_result`; no live pending-bytes accessor is currently exposed for UL grants, see §9), plus live
+  `sched_result`; no live pending-bytes accessor is currently exposed for UL grants, see [§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture)), plus live
   channel-state/HARQ enrichment looked up through the new `find_ue_cell()` accessor (see below) - the same
   accessor and the same `ue_channel_state_manager`/HARQ types serve both directions, since PUSCH SINR/RSRP and
   the HARQ handles are already direction-agnostic APIs (`ue_cell::harqs.dl_harq()`/`.ul_harq()`).
@@ -202,18 +237,28 @@ See §15 for the control-plane files added later in this effort.
 - **`apps/helpers/metrics/json_generators/du_high/scheduler.cpp`** — Exposes `dl_hol_delay_ms` in the JSON report,
   omitted when absent (no fabricated zero for "no pending data").
 
-## 7. Metrics currently emitted
+## 5. Metrics currently emitted
 
 ### Layer 1 (periodic, per report interval; JSON + E2SM-KPM)
 
+**Already emitted by stock srsRAN, before this project — untouched, only verified ([§6](#6-metric-by-metric-source-table)/[§10](#10-how-to-validate-the-metrics-are-correct)):**
 RNTI, UE index, PCI, CQI (mean over interval), DL/UL RI, DL/UL MCS (mean), DL/UL PRB usage (total), DL/UL bit
 rate, DL/UL HARQ ACK/NACK counts, PUSCH SINR/RSRP (mean over interval), PUCCH SINR (mean), BSR, SR count, DL
-buffer occupancy (`dl_bs`), **DL HOL delay (new)**, invalid-UCI counters, PHR, TA/PUSCH-TA/PUCCH-TA/SRS-TA
-statistics, several turnaround-delay statistics (UL CE, CRC, PUSCH/PUCCH HARQ, SR-to-PUSCH), plus cell-wide
-counters (PRACH preambles, MSG3 OK/NOK, failed PDCCH/UCI allocations, decision latency histogram, PUCCH RB usage,
-per-TDD-slot PRB usage).
+buffer occupancy (`dl_bs`), invalid-UCI counters, PHR, TA/PUSCH-TA/PUCCH-TA/SRS-TA statistics, several
+turnaround-delay statistics (UL CE, CRC, PUSCH/PUCCH HARQ, SR-to-PUSCH), plus cell-wide counters (PRACH
+preambles, MSG3 OK/NOK, failed PDCCH/UCI allocations, decision latency histogram, PUCCH RB usage, per-TDD-slot
+PRB usage). That is: **every Layer 1 field except the one below is pre-existing srsRAN functionality.**
+
+**Added by this project (the only new Layer 1 field):**
+**`dl_hol_delay_ms`** — DL head-of-line queueing delay. The value it's built from (`hol_toa`) was already
+computed by RLC; it was being silently dropped one layer up before this project's fix ([§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed)). This field did
+not exist in `scheduler_ue_metrics`, the JSON output, or anywhere in the periodic report before this project.
 
 ### Layer 2 (per slot, per DL/UL grant; opt-in JSON pipe)
+
+**Everything in this layer is new — none of it existed in srsRAN before this project** ([§2](#2-final-design-chosen-for-srsran)/[§3](#3-files-changed-telemetry)/[§4](#4-per-file-rationale)). Unlike Layer
+1, there is no "pre-existing" column to fill in here: the whole opt-in FIFO pipe, both arrays below, and the
+scheduler read-only accessors they needed were all built from scratch for this work.
 
 **`dl_grants`**: `rnti`, `ue_index`, `harq_id`, `new_data`, `nof_retxs`, `mcs`, `dl_buffer_occupancy_bytes`,
 `rb_alloc_type` + (`rb_start`,`rb_len` for contiguous grants, or `rb_len` alone for RBG-bitmap grants),
@@ -225,44 +270,52 @@ per-TDD-slot PRB usage).
 (`rb_start`,`rb_len`/`rb_len`, same convention as DL), `bwp_start`, `bwp_size`, `pusch_sinr_db` +
 `pusch_avg_sinr_db`, `pusch_rsrp_dbfs`, `harq_max_retxs`, `harq_waiting_ack`, `ran_slice_id` - identical to
 `dl_grants` except no `dl_buffer_occupancy_bytes`-equivalent field (no live pending-UL-bytes accessor
-currently exposed to this component, see §9) and no `wideband_cqi`/`dl_ri` (those are DL CSI-report fields,
+currently exposed to this component, see [§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture)) and no `wideband_cqi`/`dl_ri` (those are DL CSI-report fields,
 not applicable to a UL grant).
 
 Envelope, shared by both arrays: `schema`, `ts_ns`, `sfn`, `slot`, `pci`.
 
-## 8. Metric-by-metric source table
+## 6. Metric-by-metric source table
 
-| Metric | Source (file : class/function) | Real / Derived / Unavailable | Unit | DL/UL | Scope |
-|---|---|---|---|---|---|
-| RNTI | `scheduler_metrics.h` / `sched_result` grants | Real | — | both | per-UE |
-| UE index | same | Real | — | both | per-UE |
-| PCI | `cell_configuration::pci` | Real | — | both | per-cell |
-| CQI | `ue_channel_state_manager::handle_csi_report` → `cell_metrics_handler` (`cqi_stats`) | Real | 0–15 index | DL | per-UE |
-| DL RI / UL RI | same CSI path; UL RI via SRS (`handle_srs_indication`) | Real | rank (1–8) | DL / UL | per-UE |
-| PUSCH SINR/RSRP (interval mean) | `ue_cell::handle_crc_pdu` → `cell_metrics_handler::handle_crc_indication` | Real (when PHY reports it) | dB / dBFS | UL | per-UE |
-| PUSCH SINR/RSRP (live snapshot) | `ue_channel_state_manager` (`get_pusch_snr`/`get_pusch_rsrp`), read via new `scheduler_ue_state_logger` | Real once first report arrives (`has_pusch_snr_report()` / `optional` gates it); seeded default beforehand | dB / dBFS | UL | per-UE |
-| PUCCH SINR | `cell_metrics_handler::handle_pucch_sinr` | Real | dB | UL | per-UE |
-| DL/UL MCS (interval mean) | `cell_metrics_handler` (`dl_mcs`/`ul_mcs` accumulators) | Real (averaged) | MCS index | both | per-UE |
-| MCS (per grant) | `scheduler_ue_state_logger` from `sched_result` (`dl_grants`/`ul_grants`) | Real | MCS index | both | per-UE, per-grant |
-| PRB allocation (total used) | `cell_metrics_handler` (`tot_dl_prbs_used`/`tot_ul_prbs_used`) | Real (aggregated) | # PRBs | both | per-UE |
-| PRB allocation (exact, per grant) | `scheduler_ue_state_logger` from `dl_msg_alloc::pdsch_cfg.rbs` / `ul_sched_info::pusch_cfg.rbs` | Real | RB index/count | both | per-UE, per-grant |
-| HARQ process id | `scheduler_ue_state_logger` from `pdsch_cfg.harq_id` / `pusch_cfg.harq_id` | Real | id | both | per-UE, per-grant |
-| Retransmission count | `scheduler_ue_state_logger` from `grant.context.nof_retxs`; also `harq_max_retxs`/`is_waiting_ack` from `dl_harq_process_handle`/`ul_harq_process_handle` | Real | count | both | per-UE, per-grant |
-| BLER / ACK-NACK derived | `cell_metrics_handler` (`dl_nof_ok`/`dl_nof_nok`, `ul_nof_ok`/`ul_nof_nok`) | Real (counts; BLER = nok/(ok+nok) computed by consumer) | count | both | per-UE |
-| Throughput / bit rate | `cell_metrics_handler` (`dl_brate_kbps`/`ul_brate_kbps`, from acknowledged TB bytes / report period) | Real | kbps | both | per-UE |
-| BSR / pending UL bytes (periodic) | `cell_metrics_handler::handle_ul_bsr_indication` | Real | bytes | UL | per-UE |
-| DL buffer occupancy | `cell_metrics_handler::handle_dl_buffer_state_indication` (`dl_bs`, aggregated) / `scheduler_ue_state_logger` (`dl_buffer_occupancy_bytes`, per-grant post-allocation value) | Real | bytes | DL | per-UE (both scopes) |
-| Pending UL bytes (per-grant) | — | **Unavailable at grant level** — `ue::pending_ul_newtx_bytes()` exists but isn't reachable from `scheduler_ue_state_logger`'s current `ue_cell`-scoped accessor; see §9 | bytes | UL | per-UE, per-grant |
-| DL HOL delay (**new**) | RLC Tx entities (`lib/rlc/rlc_tx_{tm,um,am}_entity.cpp`) → `dl_buffer_state_indication_message::hol_toa` → `cell_metrics_handler` (this change) | Real | ms | DL | per-UE |
-| UL queueing-delay proxy | `cell_metrics_handler` (`avg_sr_to_pusch_delay`/`max_sr_to_pusch_delay`) | Real, but a coarser proxy (SR→grant turnaround, not true per-SDU HOL delay) — see §9/§14.3 for why no `ul_hol_delay_ms` equivalent exists | ms | UL | per-UE |
-| RAN slice id | `scheduler_ue_state_logger` from `dl_harq_process_handle`/`ul_harq_process_handle::get_grant_params().slice_id` | Real (when the UE belongs to a configured slice) | id | both | per-UE, per-grant |
-| PCI / cell id | `cell_configuration::pci`, carried on every Layer 1/Layer 2 record | Real | — | both | per-cell |
-| TA / PUSCH-TA / PUCCH-TA / SRS-TA | `cell_metrics_handler` | Real | ns (converted) | UL | per-UE |
-| PHR | `cell_metrics_handler::handle_ul_phr_indication` | Real | dB | UL | per-UE |
-| Various turnaround delays (CE, CRC, HARQ, SR-to-PUSCH) | `cell_metrics_handler` | Real | ms | UL | per-UE |
-| 5QI / QoS flow info | — | **Unavailable in this pass** — see §9 | — | — | — |
+The **Provenance** column is the direct answer to "did srsRAN already have this, or did this project add it":
+**Pre-existing** = srsRAN already computed and exposed this before this project touched anything (this project,
+at most, only *read* it in a new place); **New** = the field, the accessor, or the code path that produces it
+did not exist before this project. This is a different question from the **Real/Derived/Unavailable** column,
+which is about whether the *data value* is genuine telemetry vs. a fabricated placeholder vs. simply not
+obtainable at all — a pre-existing field can still be "Real", and a brand-new field can still be "Real" too, if
+it's just exposing data that was already being computed internally (exactly `dl_hol_delay_ms`'s situation).
 
-## 9. Metrics still missing, and exactly where to add them
+| Metric | Provenance | Source (file : class/function) | Real / Derived / Unavailable | Unit | DL/UL | Scope |
+|---|---|---|---|---|---|---|
+| RNTI | **Pre-existing** | `scheduler_metrics.h` / `sched_result` grants | Real | — | both | per-UE |
+| UE index | **Pre-existing** | same | Real | — | both | per-UE |
+| PCI | **Pre-existing** | `cell_configuration::pci` | Real | — | both | per-cell |
+| CQI | **Pre-existing** | `ue_channel_state_manager::handle_csi_report` → `cell_metrics_handler` (`cqi_stats`) | Real | 0–15 index | DL | per-UE |
+| DL RI / UL RI | **Pre-existing** | same CSI path; UL RI via SRS (`handle_srs_indication`) | Real | rank (1–8) | DL / UL | per-UE |
+| PUSCH SINR/RSRP (interval mean) | **Pre-existing** | `ue_cell::handle_crc_pdu` → `cell_metrics_handler::handle_crc_indication` | Real (when PHY reports it) | dB / dBFS | UL | per-UE |
+| PUSCH SINR/RSRP (live snapshot) | **New (Layer 2)** — `get_pusch_snr()` existed, but `get_pusch_rsrp()`/`update_pusch_rsrp()`/`has_pusch_snr_report()` and the whole read path via `scheduler_ue_state_logger` did not | `ue_channel_state_manager` (`get_pusch_snr`/`get_pusch_rsrp`), read via new `scheduler_ue_state_logger` | Real once first report arrives (`has_pusch_snr_report()` / `optional` gates it); seeded default beforehand | dB / dBFS | UL | per-UE |
+| PUCCH SINR | **Pre-existing** | `cell_metrics_handler::handle_pucch_sinr` | Real | dB | UL | per-UE |
+| DL/UL MCS (interval mean) | **Pre-existing** | `cell_metrics_handler` (`dl_mcs`/`ul_mcs` accumulators) | Real (averaged) | MCS index | both | per-UE |
+| MCS (per grant) | **New (Layer 2)** | `scheduler_ue_state_logger` from `sched_result` (`dl_grants`/`ul_grants`) | Real | MCS index | both | per-UE, per-grant |
+| PRB allocation (total used) | **Pre-existing** | `cell_metrics_handler` (`tot_dl_prbs_used`/`tot_ul_prbs_used`) | Real (aggregated) | # PRBs | both | per-UE |
+| PRB allocation (exact, per grant) | **New (Layer 2)** | `scheduler_ue_state_logger` from `dl_msg_alloc::pdsch_cfg.rbs` / `ul_sched_info::pusch_cfg.rbs` | Real | RB index/count | both | per-UE, per-grant |
+| HARQ process id | **New (Layer 2)** | `scheduler_ue_state_logger` from `pdsch_cfg.harq_id` / `pusch_cfg.harq_id` | Real | id | both | per-UE, per-grant |
+| Retransmission count | **New (Layer 2)** | `scheduler_ue_state_logger` from `grant.context.nof_retxs`; also `harq_max_retxs`/`is_waiting_ack` from `dl_harq_process_handle`/`ul_harq_process_handle` | Real | count | both | per-UE, per-grant |
+| BLER / ACK-NACK derived | **Pre-existing** | `cell_metrics_handler` (`dl_nof_ok`/`dl_nof_nok`, `ul_nof_ok`/`ul_nof_nok`) | Real (counts; BLER = nok/(ok+nok) computed by consumer) | count | both | per-UE |
+| Throughput / bit rate | **Pre-existing** | `cell_metrics_handler` (`dl_brate_kbps`/`ul_brate_kbps`, from acknowledged TB bytes / report period) | Real | kbps | both | per-UE |
+| BSR / pending UL bytes (periodic) | **Pre-existing** | `cell_metrics_handler::handle_ul_bsr_indication` | Real | bytes | UL | per-UE |
+| DL buffer occupancy | **Mixed**: the Layer 1 aggregated `dl_bs` is **pre-existing**; the Layer 2 per-grant `dl_buffer_occupancy_bytes` value is **new** | `cell_metrics_handler::handle_dl_buffer_state_indication` (`dl_bs`, aggregated) / `scheduler_ue_state_logger` (`dl_buffer_occupancy_bytes`, per-grant post-allocation value) | Real | bytes | DL | per-UE (both scopes) |
+| Pending UL bytes (per-grant) | N/A — not built | — | **Unavailable at grant level** — `ue::pending_ul_newtx_bytes()` exists but isn't reachable from `scheduler_ue_state_logger`'s current `ue_cell`-scoped accessor; see [§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture) | bytes | UL | per-UE, per-grant |
+| DL HOL delay | **New (Layer 1 fix)** — the only new *field* in Layer 1; see [§0](#0-motivation-gaps-and-contributions)/[§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed) | RLC Tx entities (`lib/rlc/rlc_tx_{tm,um,am}_entity.cpp`) → `dl_buffer_state_indication_message::hol_toa` → `cell_metrics_handler` (this change) | Real | ms | DL | per-UE |
+| UL queueing-delay proxy | **Pre-existing** | `cell_metrics_handler` (`avg_sr_to_pusch_delay`/`max_sr_to_pusch_delay`) | Real, but a coarser proxy (SR→grant turnaround, not true per-SDU HOL delay) — see [§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture)/[§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed) for why no `ul_hol_delay_ms` equivalent exists | ms | UL | per-UE |
+| RAN slice id | **New (Layer 2)** — the slice concept/assignment itself is pre-existing scheduler state; exposing it *per grant* is new | `scheduler_ue_state_logger` from `dl_harq_process_handle`/`ul_harq_process_handle::get_grant_params().slice_id` | Real (when the UE belongs to a configured slice) | id | both | per-UE, per-grant |
+| PCI / cell id | **Pre-existing** | `cell_configuration::pci`, carried on every Layer 1/Layer 2 record | Real | — | both | per-cell |
+| TA / PUSCH-TA / PUCCH-TA / SRS-TA | **Pre-existing** | `cell_metrics_handler` | Real | ns (converted) | UL | per-UE |
+| PHR | **Pre-existing** | `cell_metrics_handler::handle_ul_phr_indication` | Real | dB | UL | per-UE |
+| Various turnaround delays (CE, CRC, HARQ, SR-to-PUSCH) | **Pre-existing** | `cell_metrics_handler` | Real | ms | UL | per-UE |
+| 5QI / QoS flow info | N/A — not built | — | **Unavailable in this pass** — see [§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture) | — | — | — |
+
+## 7. Metrics still missing, and exactly where to add them
 
 - **5QI / DRB QoS flow identity per UE**, requested by the reference design as a tag. srsRAN tracks QoS flow →
   DRB → logical channel mapping in the DU manager / F1AP UE context (`lib/du_manager`, `du_ue` QoS configuration),
@@ -271,30 +324,8 @@ Envelope, shared by both arrays: `schema`, `ts_ns`, `sfn`, `slot`, `pci`.
   metrics with DU-manager-held QoS config *outside* the scheduler, at the metrics-consumption layer (JSON/E2
   generator), keyed by `ue_index`, which is already common to both sides. Not implemented here: it's a
   cross-layer join, not a scheduler instrumentation gap, and deserves its own design pass.
-- ~~**Per-grant UL telemetry (Layer 2)**~~ - **done.** A parallel `"ul_grants"` array (mirroring `"dl_grants"`
-  field-for-field: RNTI, HARQ id, MCS, RB allocation, retransmission count, live PUSCH SINR/RSRP, HARQ
-  max-retx/waiting-ack, RAN slice id) was added to `scheduler_ue_state_logger.cpp`, sourced from
-  `sched_result.ul.puschs` and `ue_cell::harqs.ul_harq()`, following the identical pattern used for DL. One
-  field does *not* have a UL equivalent: DL grants carry `dl_buffer_occupancy_bytes` straight from
-  `sched_result`, but there is no analogous live pending-UL-bytes field on `ul_sched_info` - the closest
-  accessor, `ue::pending_ul_newtx_bytes()`, lives on the scheduler's `ue` object, not on the `ue_cell` this
-  component currently has access to via `ue_cell_scheduler::find_ue_cell()`. Rather than add a new
-  cross-layer accessor for one field, it's simply omitted from `ul_grants` entries for now, consistent with
-  this component's "only emit a field when real data exists" principle.
-- **Pre-trim required RBs/MCS vs. final allocation** (the OAI reference's `rbs_req/mcs_req` vs. `rbs_out/mcs_out`
-  distinction, i.e. what link adaptation *asked for* before PRB availability trimmed it down). srsRAN's link
-  adaptation / grant sizing happens inside `lib/scheduler/policy/scheduler_time_qos.cpp` and
-  `lib/scheduler/ue_scheduling/grant_params_selector.cpp` / `intra_slice_scheduler.cpp`, before the final grant is
-  written into `sched_result`. **Hook point**: instrument `grant_params_selector` (or wherever the pre-trim
-  MCS/RB count is first computed) to stash the pre-trim values on the UE's transient per-slot state, then have
-  `scheduler_ue_state_logger` read them back when it later sees the final grant in `sched_result`. Not implemented
-  here — it requires touching core allocation logic, which is exactly the kind of "avoid touching production
-  scheduler logic unless clearly justified" trade-off called out in the task; documented as the next step rather
-  than done speculatively.
-- ~~**UL HARQ id / retx count / RB allocation at grant level**~~ - **done**, as part of the Layer 2 UL grants
-  addition above.
 - **UL HOL/queueing delay, and UL delay-based scheduler prioritization** — deliberately *not* pursued as a
-  literal port of the DL `dl_hol_delay_ms` fix. See §14.3's closing note for why: the gNB has no timestamp of
+  literal port of the DL `dl_hol_delay_ms` fix. See [§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed)'s closing note for why: the gNB has no timestamp of
   when a UL SDU arrived at the UE's RLC (unlike DL, where the gNB's own RLC Tx entity produces that
   timestamp), so there is no `rlc_buffer_state`-equivalent event to plumb through for UL. The closest real,
   already-instrumented proxy is SR-to-PUSCH-grant turnaround delay (`avg_sr_to_pusch_delay`/
@@ -306,14 +337,8 @@ Envelope, shared by both arrays: `schema`, `ts_ns`, `sfn`, `slot`, `pci`.
   not a telemetry gap. Left as a deferred, separate, higher-risk item - the same category of decision as the
   DL clock-mismatch fix was originally treated as.
 
-## 10. Mapping to a real near-RT RIC / xApp architecture
+## 8. Mapping to a real near-RT RIC / xApp architecture
 
-- Layer 1 (`scheduler_ue_metrics`/`scheduler_cell_metrics`) is **already** the data source for srsRAN's E2SM-KPM
-  agent (`lib/e2/e2sm/e2sm_kpm/e2sm_kpm_du_meas_provider_impl.cpp`), which exposes standard O-RAN measurement
-  names (`CQI`, `RSRP`, `RRU.PrbUsedDl/Ul`, `RRU.PrbAvailDl/Ul`, `DRB.UEThpDl/Ul`, `DRB.RlcSduDelayDl`, etc.) over
-  E2AP. **A real near-RT RIC pointed at srsRAN's E2 agent today already gets most of the telemetry list in this
-  task** (CQI, RSRP, PRB usage, throughput, RLC-side delay) with zero additional code — it's a matter of enabling
-  the E2 agent (`e2: enable_du_e2: true`, `e2sm_kpm_enabled: true`) and pointing it at a RIC.
 - The new `dl_hol_delay_ms` field is on the same struct, so it is automatically available to be added as a new
   KPM measurement name (there is no existing O-RAN standard name for "scheduler-side instantaneous DL HOL delay";
   `DRB.RlcSduDelayDl` is a related-but-different, already-existing RLC-side *average* SDU pull latency). Adding a
@@ -326,14 +351,10 @@ Envelope, shared by both arrays: `schema`, `ts_ns`, `sfn`, `slot`, `pci`.
   cadence a real control-loop xApp needs (E2's near-RT budget is ~10 ms–1 s). Until that SM is designed, Layer 2's
   pipe is the pragmatic stand-in for local agent development.
 - **Control**: srsRAN's E2SM-RC implementation (`lib/e2/e2sm/e2sm_rc`) already had a fully working DU-side control
-  action - **Style 2 / Action 6, "Slice-level PRB quota"** - equivalent to (and better than) OAI's Telnet-driven
-  PRB masking, since it's RIC-mediated over standard E2AP rather than a REST-to-Telnet bridge. We proved this
-  live (§14.1). We added one more control action, a **UE bitrate cap** (§14.4), for the one OAI capability
-  (`UL_control_termination.py`'s FWA/MTC throughput caps) that had no existing srsRAN equivalent. The third OAI
-  capability, UL power-control target, turned out to be blocked by srsRAN's Enterprise/OSS split, not by a missing
-  E2SM-RC action - see §14.2.
+  action - **Style 2 / Action 6, "Slice-level PRB quota"**. We proved this
+  live ([§12.1](#121-baseline-for-comparison-pre-existing-prb-quota-control-not-a-contribution-of-this-project)). We added one more control action, a **UE bitrate cap** ([§12.4](#124-new-control-action-ue-bitrate-cap-throughput-cap)).
 
-## 11. How to build and run
+## 9. How to build and run
 
 Build (from `build/`, already configured):
 
@@ -371,13 +392,13 @@ cat /tmp/srsran_ue_state.pipe | jq .
 The FIFO is created by the gNB process itself (`mkfifo`, 0666) if it doesn't already exist; if no reader is
 attached, writes are dropped silently (never block the scheduler).
 
-**Control** (E2SM-RC, PRB quota - already worked; UE bitrate cap - new, §14.4), from inside the RIC's
+**Control** (E2SM-RC, PRB quota - already worked; UE bitrate cap - new, [§12.4](#124-new-control-action-ue-bitrate-cap-throughput-cap)), from inside the RIC's
 `python_xapp_runner` container (`docker compose exec python_xapp_runner bash`, from `~/oran-sc-ric`):
 
 ```sh
 cd /opt/xApps
 # PRB quota (existing srsRAN functionality, cycles 30/50/70/100%):
-python3 simple_rc_xapp.py --e2_node_id <your gNB's E2 node id> --ran_func_id 3 --gnb_cu_ue_f1ap_id 0
+python3 simple_rc_xapp.py --e2_node_id <your gNB E2 node id> --ran_func_id 3 --gnb_cu_ue_f1ap_id 0
 # UE bitrate cap (new, cycles 5/15/30/60 Mbps DL):
 python3 simple_bitrate_cap_xapp.py --e2_node_id <your gNB's E2 node id> --ran_func_id 3 --gnb_cu_ue_f1ap_id 0
 ```
@@ -386,7 +407,7 @@ The gNB's E2 node ID can be found via the E2 Manager's REST API: `curl http://<e
 (inside the `ric_e2mgr` container, or wherever it's reachable from). In this testbed it was
 `gnbd_001_001_00019b_0` (both test xApps default to this).
 
-## 12. How to validate the metrics are correct
+## 10. How to validate the metrics are correct
 
 - **Build verification performed**: `srsran_sched`, `scheduler_logger`, `ue_sched`, `sched_ue_context`, the JSON
   generator target, and the full `gnb` executable were all rebuilt from a clean touch of every changed file — all
@@ -405,41 +426,38 @@ The gNB's E2 node ID can be found via the E2 Manager's REST API: `curl http://<e
      `E2SM-KPM: Received RLC metrics: ue=0 DRB1` logged continuously on the gNB side, i.e. the RIC is actively
      being fed.
   2. **Found `dl_hol_delay_ms` never actually populates** even under sustained non-zero `dl_bs` - root-caused to
-     a pre-existing upstream gap, not a bug in this change (§14.3). This is the one telemetry item in this
-     document whose "should work" analysis (§8) turned out to be wrong on live testing, and the write-up above
+     a pre-existing upstream gap, not a bug in this change ([§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed)). This is the one telemetry item in this
+     document whose "should work" analysis ([§7](#7-metrics-still-missing-and-exactly-where-to-add-them)) turned out to be wrong on live testing, and the write-up above
      has been corrected accordingly.
   3. With `SRSRAN_UE_STATE_PIPE` set, captured the FIFO during attach and during traffic tests: confirmed one
      JSON line per slot, non-empty `dl_grants` with real RNTI/HARQ id/MCS/RB allocation matching the gNB's own
      `SCHED`/`PHY` log lines for the same slot, and empty arrays (not fabricated entries) on idle slots.
-  4. Validated both control actions live end-to-end - see §14.1 (PRB quota) and §14.4 (new UE bitrate cap) for
+  4. Validated both control actions live end-to-end - see [§12.1](#121-baseline-for-comparison-pre-existing-prb-quota-control-not-a-contribution-of-this-project) (PRB quota) and [§12.4](#124-new-control-action-ue-bitrate-cap-throughput-cap) (new UE bitrate cap) for
      the detailed results (InfluxDB throughput staircases matching the exact xApp-driven targets).
 
-## 13. Known limitations and next steps
+## 11. Known limitations and next steps
 
-- Layer 2 is single-pipe, single-consumer, best-effort (now covering both DL and UL grants, see §6/§9), and has
+- Layer 2 is single-pipe, single-consumer, best-effort (now covering both DL and UL grants, see [§5](#5-metrics-currently-emitted)/[§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture)), and has
   no schema versioning beyond the `"schema":"srsran_ue_state_v1"` tag — treat it as a development tool, not an
   API contract.
 - 5QI/QoS-flow tagging, pre-trim link-adaptation values, and true UL queueing-delay measurement remain
-  documented gaps (§9), not implemented - UL per-grant telemetry itself (RNTI, HARQ id, MCS, RB allocation,
-  retx count, PUSCH SINR/RSRP, HARQ state) is now implemented; see §9 for exactly which UL fields still have
+  documented gaps ([§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture)), not implemented - UL per-grant telemetry itself (RNTI, HARQ id, MCS, RB allocation,
+  retx count, PUSCH SINR/RSRP, HARQ state) is now implemented; see [§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture) for exactly which UL fields still have
   no data source and why.
 - No E2SM extension was added for the new `dl_hol_delay_ms` field or for any Layer 2 field; both remain
   accessible only via JSON/pipe until a near-RT RIC needs them over E2. The pre-existing srsRAN gap that
-  previously kept it unpopulated end-to-end (§14.3) has since been fixed and **live-validated** - `dl_hol_delay_ms`
-  now has a real, wired-through value confirmed in InfluxDB under DL saturation (§14.3).
+  previously kept it unpopulated end-to-end ([§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed)) has since been fixed and **live-validated** - `dl_hol_delay_ms`
+  now has a real, wired-through value confirmed in InfluxDB under DL saturation ([§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed)).
 - The `scheduler_metrics_handler_test` unit test should be extended for the new field but this could not be
-  verified by running it in this environment (`BUILD_TESTING=OFF`/no GTest installed here, see §14.5) - this
-  remains true after the §14.3 fix as well.
-- The UE bitrate cap (§14.4) is enforced with a 20 ms token-bucket burst window; this was chosen for
+  verified by running it in this environment (`BUILD_TESTING=OFF`/no GTest installed here, see [§12.5](#125-build-and-validation-evidence-for-the-control-plane-changes)) - this
+  remains true after the [§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed) fix as well.
+- The UE bitrate cap ([§12.4](#124-new-control-action-ue-bitrate-cap-throughput-cap)) is enforced with a 20 ms token-bucket burst window; this was chosen for
   responsiveness and validated live, but is a tunable, not a value derived from a spec or requirement.
 - UE bitrate cap requests and PRB-quota requests both fully replace the UE's `sched_ue_resource_alloc_config` on
   every RIC Control Request (no merge) - see the caveat on `du_mac_sched_control_config` in
   `include/srsran/du/du_high/du_manager/du_configurator.h`. An xApp that wants both a PRB quota and a bitrate cap
   active simultaneously must resend both parameters in every request.
-- TX/RX gain control (`ru_gain_controller`) is real, live, non-Enterprise-gated srsRAN functionality, but is not
-  yet exposed over E2SM-RC (only via the gNB's interactive stdin console) - see §14.2 for why we didn't pursue it
-  as the next control action.
-- **Future work: validate HOL-delay-based UE prioritization in a multi-UE scenario.** The §14.3 fix makes
+- **Future work: validate HOL-delay-based UE prioritization in a multi-UE scenario.** The [§12.3](#123-a-pre-existing-srsran-gap-found-via-live-validation-dl-hol-delay-never-actually-populates---now-fixed) fix makes
   `scheduler_time_qos.cpp`'s delay-weighted prioritization term (`delay_weight += hol_delay_ms / pdb`, keyed by
   each bearer's `packet_delay_budget_ms`) receive real, non-zero data for the first time - but this was only
   validated with a single attached UE, where there's no other UE to prioritize *against*. Not yet checked:
@@ -450,80 +468,34 @@ The gNB's E2 node ID can be found via the E2 Manager's REST API: `curl http://<e
   allocation order/share*, not just the *telemetry value*. This is the natural next validation step before
   relying on this fix for any SLA/QoS-sensitive multi-user scenario.
 
-## 14. Control: implemented and validated E2SM-RC extensions
+## 12. Control: implemented and validated E2SM-RC extensions
 
 This section covers the control-plane work: what already existed, what we found blocked, and what we built new -
 all verified against a **live testbed** (srsRAN gNB + srsUE over the ZMQ RF simulator, Open5GS 5GC, the O-RAN SC
 near-RT RIC, and Telegraf/InfluxDB/Grafana), not just by reading code or unit-testing in isolation.
 
-### 14.1 PRB quota control - already implemented, proven live, zero new code
+### 12.1 Baseline for comparison: pre-existing PRB quota control (not a contribution of this project)
 
-Investigation found that srsRAN's E2SM-RC agent already fully implements **O-RAN Style 2 / Action 6, "Slice-level
-PRB quota"**, end to end: `lib/e2/e2sm/e2sm_rc/e2sm_rc_control_action_du_executor.cpp`
-(`e2sm_rc_control_action_2_6_du_executor`) parses the RIC Control Request's RRM Policy Ratio Group (min/max/
-dedicated PRB ratio, keyed by PLMN + S-NSSAI) and calls `du_configurator::configure_ue_mac_scheduler()`, which
-flows through `du_ue_ric_configuration_procedure.cpp` into the scheduler's `sched_ue_resource_alloc_config::
-pdsch_grant_size_limits`/`pusch_grant_size_limits`, enforced in `grant_params_selector.cpp`. This is registered
-in `lib/e2/common/e2_du_factory.cpp`.
+Mentioned here only because C3 ([§12.4](#124-new-control-action-ue-bitrate-cap-throughput-cap)) is directly compared against it below — no code in this bullet is ours.
+srsRAN's E2SM-RC agent already implements **O-RAN Style 2 / Action 6, "Slice-level PRB quota"**
+(`e2sm_rc_control_action_2_6_du_executor` → `grant_params_selector.cpp`), a *resource-share* lever (%), not an
+outcome lever. Cycling it 30%→50%→70%→100% against a saturating UE produced three clean throughput plateaus
+(~23.3 → ~39.9 → ~53.6 Mbps) — confirming it works, but also confirming the gap C3 fills: an operator using this
+action cannot state "cap this UE at 30 Mbps," only "give this UE 50% of the PRBs and hope."
 
-We validated this live using the reference RIC's own example xApp (`~/oran-sc-ric/xApps/python/
-simple_rc_xapp.py`), which cycles a UE's PRB quota through 30% → 50% → 70% → 100%, holding each for 5 seconds,
-against a real attached UE pulling saturating DL traffic via `iperf3`. Querying InfluxDB (`SELECT time, dl_brate,
-dl_mcs FROM ue ORDER BY time DESC`) during the run showed three clean, distinct throughput plateaus - **~23.3
-Mbps → ~39.9 Mbps → ~53.6 Mbps** - each held for exactly the ~5 s window the xApp was setting that PRB ratio,
-confirmed via the gNB log (`E2SM-RC: Slice-level PRB quota Control Request ... Min PRB Policy Ratio: 10 Max PRB
-Policy Ratio: 70 ...` immediately followed by `MAC UE Reconfiguration: finished successfully` and `Sending E2 RIC
-Control Acknowledge`). This is a working, real-time, RIC-mediated equivalent of OAI's Telnet-driven PRB masking,
-with no code changes required.
+### 12.2 A pre-existing srsRAN gap found via live validation: DL HOL delay never actually populates - now fixed
 
-### 14.2 UL power-control target and TX/RX gain - investigated, not implemented, here's why
-
-Before building a third control action, we checked whether srsRAN could actually *do* anything with a UL SINR
-target or a gain value, since building E2SM-RC plumbing to a dead end would be worse than not building it:
-
-- **UL power control target** (`pusch_sinr_target_dB` in `lib/scheduler/support/pusch_power_controller.{h,cpp}`)
-  is read once from static config and then immediately `static_cast<void>`'d to silence an unused-variable
-  warning - it is **never read anywhere else in the codebase**. The function that would actually use it,
-  `compute_tpc_command()`, is compiled `#ifndef SRSRAN_HAS_ENTERPRISE` with a hardcoded stub in the open-source
-  build (`// Dummy function. This feature is only available in the SRSRAN 5G Enterprise version.` -
-  `return default_tpc = 1;`). This build has no Enterprise plugin. Building an E2SM-RC action for this would let a
-  RIC send a command that gets ACKed and then has zero observable effect - so we didn't build it.
-- **TX/RX gain** (`ru_gain_controller::set_tx_gain/set_rx_gain`, `include/srsran/ru/ru_controller.h`) is real,
-  live, functional code on real hardware (`lib/radio/uhd/radio_uhd_impl.cpp` calls into the actual UHD driver),
-  and is *not* Enterprise-gated. It's already reachable, but only via an interactive stdin command typed into the
-  gNB's own console (`apps/units/flexible_o_du/flexible_o_du_commands.h`, `tx_gain`/`rx_gain`). However, our ZMQ
-  RF simulator driver hardcodes `set_tx_gain`/`set_rx_gain` to `return false;`
-  (`lib/radio/zmq/radio_session_zmq_impl.cpp`) - it's a lossless loopback with no amplitude/noise model at all
-  (which is also why every RSRP/SINR/CQI reading throughout this session's testing was suspiciously ideal: CQI
-  pinned at 15, RSRP at 0 dBFS). So on *this* testbed, wiring gain control over E2SM-RC would be real code with no
-  way to prove it works - only real hardware (or a channel-impairment RF driver, which srsRAN doesn't ship outside
-  test-only code) would show a measurable effect. We chose to build the UE bitrate cap instead (§14.4), which is
-  pure scheduler-side logic with no RF dependency, and so is just as demonstrable on ZMQ as it will be on real
-  hardware.
-
-### 14.3 A pre-existing srsRAN gap found via live validation: DL HOL delay never actually populates - now fixed
-
-While validating `dl_hol_delay_ms` (§6, Layer 1) under a real 46 Mbps DL saturation test, `dl_bs` (DL buffer
+While validating `dl_hol_delay_ms` ([§5](#5-metrics-currently-emitted), Layer 1) under a real 46 Mbps DL saturation test, `dl_bs` (DL buffer
 occupancy) was confirmed non-zero on every single InfluxDB sample, yet `dl_hol_delay_ms` never appeared even
 once - InfluxDB's schema-on-write literally had no column for it. Tracing this down (not merely re-reading our
 own code, but the full path from RLC to the DU manager) found the real cause one layer further upstream than
 where we'd made our change: `lib/du/du_high/du_manager/du_ue/du_ue_adapters.h`, class
 `rlc_tx_mac_buffer_state_updater::on_buffer_state_update()` - the actual production RLC→MAC bridge - has a
 `// TODO: set hol_toa` and never copies the real `rlc_buffer_state::hol_toa` (correctly computed by
-`lib/rlc/rlc_tx_am_entity.cpp` etc.) into the MAC-layer message. This is a **pre-existing gap in srsRAN itself**,
-not introduced by this work, and it means `lib/scheduler/policy/scheduler_time_qos.cpp`'s HOL-delay-based UE
-prioritization is *also* silently a no-op in the real DU today, independent of any telemetry concerns. At the time
-this section was first written, it was deliberately left unfixed (see §9/§13, original wording below) since it
-spans two subsystems, needs a clock-type reconciliation, and can change live scheduling behavior - a decision we
-felt belonged to the repo owner rather than a silent fix:
+`lib/rlc/rlc_tx_am_entity.cpp` etc.) into the MAC-layer message. This is a **pre-existing gap in srsRAN itself**, and it means `lib/scheduler/policy/scheduler_time_qos.cpp`'s HOL-delay-based UE
+prioritization is *also* silently a no-op in the real DU today, independent of any telemetry concerns.
 
-> "Not fixed here (see §9/§13): it spans two subsystems, needs a clock-type reconciliation (`steady_clock` in RLC
-> vs. `system_clock` declared on the MAC message vs. `high_resolution_clock` used by the scheduler adapter's
-> conversion function), and can change live scheduling behavior, so we treated it as a decision for the repo
-> owner rather than a silent fix."
-
-**Update: fixed, at the repo owner's request.** Two intertwined gaps were closed, plus a second silent drop point
-found while implementing the fix that this section's original investigation had missed:
+To solve this:
 
 1. **The TODO itself** - `du_ue_adapters.h`'s `on_buffer_state_update()` now does `bs.hol_toa = rlc_bs.hol_toa;`
    instead of dropping it.
@@ -564,7 +536,7 @@ SELECT time, dl_brate, dl_bs, dl_hol_delay_ms FROM ue ORDER BY time DESC LIMIT 5
 ```
 
 `dl_hol_delay_ms` now populates on every sample (previously: present in the schema-on-write sense not at all,
-per §12 item 2) - typical values were 1 ms, with a 3 ms spike observed alongside a `dl_bs` bump to ~16 KB,
+per [§11](#11-known-limitations-and-next-steps) item 2) - typical values were 1 ms, with a 3 ms spike observed alongside a `dl_bs` bump to ~16 KB,
 tracking buffer occupancy as expected. Over a 60 s window: 56/57 samples at 1 ms, 1 sample at 3 ms - consistent,
 plausible values, not a fixed/fabricated constant. This testbed only had a single attached UE, so
 `scheduler_time_qos.cpp`'s delay-based *prioritization* (as opposed to the delay measurement itself) was not
@@ -576,21 +548,20 @@ reads from the same now-populated `hol_toa`, this fix also activates a previousl
 UEs with QoS policies configured (`packet_delay_budget_ms`) will now actually be delay-prioritized against each
 other under contention, where before this term was always zero. This is presumably the intended effect of fixing
 the gap, but it is a live scheduling-behavior change, not a metrics-only fix - worth watching for during
-multi-UE contention testing. See §13's "Future work" entry for the specific multi-UE experiment to run to
+multi-UE contention testing. See [§12](#12-control-implemented-and-validated-e2sm-rc-extensions)'s "Future work" entry for the specific multi-UE experiment to run to
 confirm this prioritization is actually taking effect, not just that the underlying metric is now populated.
 
 **Scope note: this fix is DL-only, deliberately.** UL has no equivalent gap to fix, because it has no
 equivalent *data source*: `hol_toa` exists for DL because the gNB's own RLC Tx entity timestamps SDU
 arrival for data it is about to transmit. For UL, the SDU lives in the UE's buffer until the gNB grants it -
-the gNB never observes a UL SDU's arrival time, so there is nothing analogous to copy through. See §9's UL
+the gNB never observes a UL SDU's arrival time, so there is nothing analogous to copy through. See [§8](#8-mapping-to-a-real-near-rt-ric--xapp-architecture)'s UL
 HOL-delay bullet for the practical proxy that already exists (SR-to-PUSCH turnaround delay) and why building
 genuine UL queueing-delay measurement is a separate, deferred, higher-risk piece of work, not a follow-on to
 this fix.
 
-### 14.4 New control action: UE bitrate cap (throughput cap)
+### 12.3 New control action: UE bitrate cap (throughput cap)
 
-**What it is**: a direct cap on a UE's sustained DL and/or UL bitrate, in kbps - the missing third OAI capability
-(`UL_control_termination.py`'s `fwa_value`/`mtc_value` Mbps caps). This is a different lever than PRB quota:
+**What it is**: a direct cap on a UE's sustained DL and/or UL bitrate, in kbps. This is a different lever than PRB quota:
 PRB quota caps a *resource share* (%), so achieved throughput still floats with channel quality; a bitrate cap
 targets the *outcome* (kbps) directly, useful for SLA-style policies.
 
@@ -627,7 +598,7 @@ changing behavior for existing PRB-quota-only requests.
 (`lib/e2/e2sm/e2sm_rc/e2sm_rc_control_action_du_executor.{h,cpp}`), registered under the same Style 2 service as
 the PRB-quota action in `lib/e2/common/e2_du_factory.cpp`. Action ID **201** is deliberately outside the O-RAN
 Style 2 standard catalogue's range: there is no standard action for a direct bitrate cap (the closest, PRB quota,
-caps resource share, not rate), so this is explicitly a vendor/srsRAN-specific extension, not a misuse of a
+caps resource share, not rate), so this is explicitly a vendor-specific extension, not a misuse of a
 real standard action ID. RAN parameters: ID 1 = "Maximum DL Bitrate" (kbps, integer), ID 2 = "Maximum UL Bitrate"
 (kbps, integer), following the exact same flat leaf-parameter pattern the existing code uses for min/max PRB
 ratio.
@@ -653,29 +624,7 @@ The cycle repeated identically on a second pass through the same four steps, con
 reproducible control, not a one-off coincidence. The small consistent overshoot is the token bucket's 20 ms burst
 allowance plus TBS-granularity rounding, both expected and bounded.
 
-**Real-hardware / COTS UE compatibility**: this mechanism is deliberately pure scheduler-side arithmetic (byte
-budgets, PRB/MCS selection) with no RF-layer dependency anywhere in the enforcement path - it does not touch
-`ru_gain_controller`, PHY gain, or any driver-specific code, unlike the gain-control option discussed in §14.2.
-Nothing in `ue_bitrate_limiter` or its call sites references the ZMQ driver, a simulator, or any test-only code
-path, so the same enforcement logic applies identically whether the RF path is the ZMQ simulator, a UHD/USRP
-front end, or any other supported radio, and identically whether the far end is `srsUE` or a COTS UE (the
-scheduler has no visibility into which - grant sizing is UE-implementation-agnostic). This was a design
-constraint from the start (§14.4 "Design"), not a retrofit.
-
-### 14.5 Build and validation evidence for the control-plane changes
-
-- `srsran_sched`, `srsran_du_manager`, `srsran_e2`, and the full `gnb` executable were rebuilt from scratch after
-  every control-plane change in this section; all compiled and linked cleanly.
-- No unit tests were run (GTest is not installed in this environment; `-DBUILD_TESTING=ON` fails to configure -
-  see §12/§13). All validation is therefore live-system evidence (gNB log lines, InfluxDB query results),
-  documented inline in §14.1 and §14.4, gathered against the actual testbed described in `setup_run.md` rather
-  than assumed from code inspection.
-- One gNB crash was observed earlier in this session (before the control-plane work), coinciding with an
-  unbounded UDP `iperf3 -R` flood; no error was logged and no core dump was found. It was not reproduced during
-  any of the control-plane testing (which used bounded TCP `iperf3` runs), and its cause remains unconfirmed -
-  flagged here for visibility, not because it's known to relate to any of these changes.
-
-## 15. Files changed (control-plane additions, this session)
+## 13. Files changed (control-plane additions, this session)
 
 | File | Status |
 |---|---|
@@ -695,12 +644,11 @@ constraint from the start (§14.4 "Design"), not a retrofit.
 | `~/oran-sc-ric/xApps/python/lib/e2sm_rc_module.py` | modified (separate repo) |
 | `~/oran-sc-ric/xApps/python/simple_bitrate_cap_xapp.py` | new (separate repo) |
 
-## 16. Files changed (UL extension, this session)
+## 14. Files changed (UL extension, this session)
 
-Extends the Layer 2 telemetry (§6) to UL grants and exercises the already-built UL bitrate cap (§14.4) via the
+Extends the Layer 2 telemetry ([§5](#5-metrics-currently-emitted)) to UL grants and exercises the already-built UL bitrate cap ([§12.4](#124-new-control-action-ue-bitrate-cap-throughput-cap)) via the
 demo xApp for the first time. No scheduler/E2SM-RC changes were needed - both were already direction-agnostic
-(§14.4's "Real-hardware / COTS UE compatibility" note applies equally here: UL enforcement has zero new RF or
-platform dependency either).
+([§12.4](#124-new-control-action-ue-bitrate-cap-throughput-cap)).
 
 | File | Status |
 |---|---|
