@@ -81,7 +81,7 @@ srsRAN-specific one, can drive it.
   suffix marks the DU). Targeting the wrong one gets you `RIC Control Service not supported` from the DU agent,
   not a routing failure (see §14/§15).
 - **5GC**: Open5GS (AMF, SMF, UPF, PCF, UDM/UDR, all as one `open5gs-5gc` process/container in this testbed).
-- **UE**: `srsue`, ZMQ RF loopback to the gNB (no real RF in this testbed — see §12).
+- **UE**: `srsue`, ZMQ RF loopback to the gNB.
 
 ---
 
