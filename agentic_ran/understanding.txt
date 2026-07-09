@@ -22,15 +22,6 @@ completely separate legs, from the same source of truth.
       to provide, averaged over the Averaging Window.
     * MFBR (Maximum Flow Bit Rate) - the ceiling; traffic above it "may get
       discarded or delayed by a rate shaping/policing function" (TS 23.501).
-  This project's xApp (and, per the same clause, the UPF's QER, see S2 below)
-  is exactly that "rate shaping/policing function" the spec is referring to.
-- Two aggregate limits also exist, orthogonal to per-flow GFBR/MFBR:
-  Session-AMBR (caps all Non-GBR flows of one PDU Session, combined) and
-  UE-AMBR (caps all Non-GBR flows across all of a UE's PDU Sessions,
-  combined). AMBR is out of scope for this project's enforcement mechanism,
-  which targets per-DRB/per-flow GBR bit rates (MFBR), not the Non-GBR
-  aggregate - noted here only for completeness, since both are governed by
-  the same TS 23.501 S5.7 clause.
 
 1.2 Where the value is decided, and where it is sent (the normal path)
 ------------------------------------------------------------------------
