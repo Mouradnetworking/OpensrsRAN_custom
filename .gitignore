@@ -1,7 +1,8 @@
 # Local Claude Code session/config state - not part of the project
 .claude/
 
-# srsRAN_4G build output (compiled binaries/objects - not source, would bloat clones significantly)
+# Build output (compiled binaries/objects - not source, regenerable via cmake --build)
+build/
 srsRAN_4G/build/
 
 # Python bytecode cache / editor swap files (accidentally swept in from oran-sc-ric)
