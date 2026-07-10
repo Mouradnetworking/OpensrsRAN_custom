@@ -3,3 +3,9 @@
 
 # srsRAN_4G build output (compiled binaries/objects - not source, would bloat clones significantly)
 srsRAN_4G/build/
+
+# Python bytecode cache / editor swap files (accidentally swept in from oran-sc-ric)
+__pycache__/
+*.pyc
+*.swp
+*.swo
