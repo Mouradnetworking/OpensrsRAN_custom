@@ -1,0 +1,5 @@
+# Local Claude Code session/config state - not part of the project
+.claude/
+
+# srsRAN_4G build output (compiled binaries/objects - not source, would bloat clones significantly)
+srsRAN_4G/build/
