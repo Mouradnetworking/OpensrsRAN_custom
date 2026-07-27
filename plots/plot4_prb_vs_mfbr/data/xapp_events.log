@@ -1,0 +1,12 @@
+1785167534072 114/RMR [INFO] ric message routing library on SI95 p=4560 mv=3 flg=00 id=a (f447e29 4.9.4 built: Dec 13 2023)
+15:52:15 [APPLY - max_prb_ratio=10] Sending RIC Control Request: min_prb_ratio=0 max_prb_ratio=10
+15:52:15 [APPLY - max_prb_ratio=10] Control action sent.
+[APPLY] Observing for 45s - watch gNB log / MAC PRB allocation for enforcement.
+Received RIC_CONTROL_ACK
+15:53:00 [REMOVE - max_prb_ratio=10] Sending RIC Control Request: min_prb_ratio=0 max_prb_ratio=100
+15:53:00 [REMOVE - max_prb_ratio=10] Control action sent.
+[REMOVE] Observing for 45s - watch gNB log / MAC PRB allocation for enforcement.
+Received RIC_CONTROL_ACK
+
+[1] Exit (removes the quota first)  [2] Send another max_prb_ratio (%)
+Choice: Done. Quota already removed as part of the last cycle - terminating the xApp process now.
