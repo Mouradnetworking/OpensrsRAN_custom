@@ -1,0 +1,32 @@
+1785160135407 101/RMR [INFO] ric message routing library on SI95 p=4560 mv=3 flg=00 id=a (f447e29 4.9.4 built: Dec 13 2023)
+13:48:56 [APPLY - 2000kbps cap] Sending RIC Control Request: max_ul_kbps=2000 (DL left uncapped: 1000000)
+13:48:56 [APPLY - 2000kbps cap] Control action sent.
+[APPLY] Observing for 45s - watch gNB log / RLC UL SDU rate for enforcement.
+Received RIC_CONTROL_ACK
+13:49:41 [REMOVE - 2000kbps cap] Sending RIC Control Request: max_ul_kbps=1000000 (DL left uncapped: 1000000)
+13:49:41 [REMOVE - 2000kbps cap] Control action sent.
+[REMOVE] Observing for 45s - watch gNB log / RLC UL SDU rate for enforcement.
+Received RIC_CONTROL_ACK
+
+[1] Exit (removes the cap first)  [2] Send another cap (kbps)
+Choice: New UL cap in kbps: 13:50:26 [APPLY - 4000kbps cap] Sending RIC Control Request: max_ul_kbps=4000 (DL left uncapped: 1000000)
+13:50:26 [APPLY - 4000kbps cap] Control action sent.
+[APPLY] Observing for 45s - watch gNB log / RLC UL SDU rate for enforcement.
+Received RIC_CONTROL_ACK
+13:51:11 [REMOVE - 4000kbps cap] Sending RIC Control Request: max_ul_kbps=1000000 (DL left uncapped: 1000000)
+13:51:11 [REMOVE - 4000kbps cap] Control action sent.
+[REMOVE] Observing for 45s - watch gNB log / RLC UL SDU rate for enforcement.
+Received RIC_CONTROL_ACK
+
+[1] Exit (removes the cap first)  [2] Send another cap (kbps)
+Choice: New UL cap in kbps: 13:51:56 [APPLY - 6000kbps cap] Sending RIC Control Request: max_ul_kbps=6000 (DL left uncapped: 1000000)
+13:51:56 [APPLY - 6000kbps cap] Control action sent.
+[APPLY] Observing for 45s - watch gNB log / RLC UL SDU rate for enforcement.
+Received RIC_CONTROL_ACK
+13:52:41 [REMOVE - 6000kbps cap] Sending RIC Control Request: max_ul_kbps=1000000 (DL left uncapped: 1000000)
+13:52:41 [REMOVE - 6000kbps cap] Control action sent.
+[REMOVE] Observing for 45s - watch gNB log / RLC UL SDU rate for enforcement.
+Received RIC_CONTROL_ACK
+
+[1] Exit (removes the cap first)  [2] Send another cap (kbps)
+Choice: Done. Cap already removed as part of the last cycle - terminating the xApp process now.

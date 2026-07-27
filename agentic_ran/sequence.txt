@@ -15,6 +15,8 @@ else RIC-driven QoS change (E2SM-RC control path)
   CUCP->CUCP: E2SM-RC control handler parses RAN\nparameters (DRB ID, 5QI, GBR-QoS-Info\n{MFBR DL, MFBR UL}) and resolves\nthe target UE context
 end
 
+note over CUCP: **This asymmetry matters.** Only the standard-trigger branch\nreaches the core over NGAP. The RIC-driven branch never does -\nthe mechanical root cause of the Core-RAN Reconciliation Gap.
+
 note over CUCP: Both trigger paths converge on the same\nCU-CP QoS-modification procedure used for a\nstandard, core-network-driven PDU Session Resource Modify
 
 CUCP->CUCP: derive the updated per-DRB QoS context\n(all unmodified QoS fields carried forward unchanged)
@@ -39,6 +41,8 @@ alt PDCP or SDAP configuration actually changed
 else MFBR-only change (no RRC-visible delta)
   note over CUCP,UE: DRB omitted entirely from\nradioBearerConfig.drb-ToAddModList -\nno RRC message sent (TS 38.331\n"signal only deltas" principle)
 end
+
+note over CUCP: For the MFBR-only case validated in this work, MFBR is never\nPDCP/SDAP-visible, so this condition is always false: the "else"\nbranch above always applies, and no RRC message is ever sent.
 
 CUCP-->RIC: E2AP RICcontrolAcknowledge\n(accepted for processing, not completion)
 RIC-->xApp: control acknowledged

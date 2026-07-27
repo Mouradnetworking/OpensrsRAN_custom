@@ -68,7 +68,7 @@ qos:
           t-poll-retransmit: 45
           max-retx-threshold: 8
           poll-pdu: -1
-          poll-byte: -1
+          poll-byte: 25000  # Temporary: bounds the gap between polls to avoid the t-PollRetransmit stall under sustained MFBR clamping (both poll-pdu/poll-byte disabled + persistent backlog left no path to re-trigger a poll; see conversation history for the full trace).
           queue-size: 16384
           queue-bytes: 6172672
 
@@ -80,6 +80,7 @@ qos:
 log:
   filename: /home/mourad6g/logs/srsgnb.log            # Path of the log file.
   all_level: info                   # Logging level applied to all layers.
+  rlc_level: debug                  # Temporary: reveals RLC AM status-report trigger decisions (poll bit, status_changed/status_requested) for the DL RLC stall investigation.
   hex_max_size: 0
 
 pcap:
@@ -87,6 +88,13 @@ pcap:
   mac_filename: /tmp/gnb_mac.pcap   # Path where the MAC PCAP is stored.
   ngap_enable: true                # Set to true to enable NGAP PCAPs.
   ngap_filename: /tmp/gnb_ngap.pcap # Path where the NGAP PCAP is stored.
+  e1ap_enable: true
+  n3_enable: true
+  n3_filename: /tmp/gnb_n3.pcap
+  rlc_rb_type: all
+  rlc_enable: true
+  mac_filename: /tmp/gnb_mac.pcap
+  e1ap_filename: /tmp/gnb_e1ap.pcap
   e2ap_enable: true                 # Set to true to enable E2AP PCAPs.
   f1ap_enable: true
   f1ap_filename: /tmp/gnb_f1ap.pcap

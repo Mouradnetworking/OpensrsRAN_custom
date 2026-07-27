@@ -1,0 +1,468 @@
+diff --git a/lib/scheduler/slicing/slice_ue_repository.h b/lib/scheduler/slicing/slice_ue_repository.h
+index efe3828e05..834375b63c 100644
+--- a/lib/scheduler/slicing/slice_ue_repository.h
++++ b/lib/scheduler/slicing/slice_ue_repository.h
+@@ -77,6 +77,15 @@ public:
+     return contains(lcid) ? u.logical_channels().pending_bytes(lcid) : 0;
+   }
+ 
++  /// \brief UE-wide (not slice-scoped) DL pending bytes, with each LCID's contribution clamped by that LCID's
++  /// remaining MFBR budget for \c sl_tx, if configured. Intended to be used as an additional, conservative ceiling
++  /// alongside \ref pending_dl_newtx_bytes() at grant-sizing time - the same role the existing UE-aggregate
++  /// bitrate cap already plays there - not as a replacement for it.
++  unsigned pending_dl_newtx_bytes_mfbr_capped(slot_point sl_tx) const
++  {
++    return u.logical_channels().dl_pending_bytes_mfbr_capped(sl_tx);
++  }
++
+   /// \brief Computes the number of UL pending bytes in bearers belonging to this slice that are not already allocated
+   /// in a UL HARQ.
+   unsigned pending_ul_newtx_bytes() const;
+@@ -90,6 +99,9 @@ public:
+     return u.logical_channels().ul_pending_bytes_mfbr_capped(sl_tx);
+   }
+ 
++  /// \brief Whether any active UL LCG for this UE has a configured MFBR cap.
++  bool has_ul_mfbr_cap() const { return u.logical_channels().has_ul_mfbr_cap(); }
++
+   /// \brief Computes the number of UL bytes that are yet to be received by the scheduler. This includes the UL bytes
+   /// of grants not yet scheduled and the UL bytes of already scheduled grants whose CRC has not reached the scheduled.
+   unsigned pending_ul_unacked_bytes(lcg_id_t lcg_id) const
+diff --git a/lib/scheduler/support/ue_bitrate_limiter.cpp b/lib/scheduler/support/ue_bitrate_limiter.cpp
+index 6c0e4c75d6..35146ecf1f 100644
+--- a/lib/scheduler/support/ue_bitrate_limiter.cpp
++++ b/lib/scheduler/support/ue_bitrate_limiter.cpp
+@@ -67,6 +67,13 @@ void ue_bitrate_limiter::consume(slot_point sl_tx, unsigned bytes_granted)
+   if (not cap_kbps.has_value()) {
+     return;
+   }
+-  tokens_bytes      = std::max(0.0, tokens_available_at(sl_tx) - static_cast<double>(bytes_granted));
++  // Deliberately not floored at 0: PRB/TBS allocation is inherently quantized (an integer number of PRBs maps to
++  // a discrete TBS from a fixed table, TS 38.214 Sec 5.1.3.2), so a granted TBS can legitimately exceed the
++  // available token budget by a small, unavoidable rounding amount. Letting the balance go negative here means
++  // that "debt" is correctly repaid out of future refills before positive budget accumulates again, keeping the
++  // long-run average rate converging on the configured cap. Flooring at 0 instead would silently forgive every
++  // such overshoot, systematically biasing the delivered rate above the cap - most noticeably for low caps and
++  // grant patterns with less "wiggle room" to average out over.
++  tokens_bytes      = tokens_available_at(sl_tx) - static_cast<double>(bytes_granted);
+   last_update_slot = sl_tx;
+ }
+diff --git a/lib/scheduler/ue_context/logical_channel_system.cpp b/lib/scheduler/ue_context/logical_channel_system.cpp
+index c1d5e3288f..f27fd99519 100644
+--- a/lib/scheduler/ue_context/logical_channel_system.cpp
++++ b/lib/scheduler/ue_context/logical_channel_system.cpp
+@@ -364,6 +364,14 @@ void logical_channel_system::configure(soa::row_id ue_rid, logical_channel_confi
+         mfbr_ul_kbps = static_cast<unsigned>(max_br_ul_bps / 1000);
+       }
+       ul_ch_ctx.mbr_limiter.set_cap(mfbr_ul_kbps);
++      if (mfbr_ul_kbps.has_value() and ul_ch_ctx.slice_id.has_value()) {
++        // An MFBR-capped UL LCG must always remain a schedulable candidate, even when its last-known BSR-derived
++        // backlog reads zero - otherwise the scheduler can never grant it the PUSCH resource needed to report an
++        // updated buffer status in the first place (TS 38.321's Regular/Periodic BSR both require an existing
++        // grant to be transmitted at all), stalling the GBR flow's feedback loop entirely between SR
++        // opportunities. See ue_logical_channel_repository::has_ul_mfbr_cap()'s doc comment.
++        slices.at(*ul_ch_ctx.slice_id).pending_ul_ues.set(ue_cfg.ue_index, true);
++      }
+     } else {
+       // Remove from QoS tracking.
+       if (ch_ctx.qos_row.has_value()) {
+@@ -677,7 +685,18 @@ void logical_channel_system::on_single_lcg_buf_st_update(ue_row&
+   if ((prev_slice_pending_bytes > 0) != (slice_pending_bytes > 0)) {
+     // zero crossing detected. Update the slice UE with pending data bitmap.
+     auto& ue_cfg = u.at<ue_config_context>();
+-    slices.at(*slice_id).pending_ul_ues.set(ue_cfg.ue_index, slice_pending_bytes > 0);
++    // An MFBR-capped UL LCG must always remain a schedulable candidate, even when this LCG's own backlog just
++    // crossed down to zero - see the matching comment in configure() for why. Preserve the bit here rather than
++    // letting a legitimate zero-crossing on this LCG clear it if some other LCG on the UE (or this same one, once
++    // more data arrives) is still MFBR-capped.
++    bool ue_wide_mfbr_capped = false;
++    for (const auto& [other_lcgid, other_ul_ch_ctx] : u.at<ue_ul_channel_context>().lcgs) {
++      if (other_ul_ch_ctx.active and other_ul_ch_ctx.mbr_limiter.is_capped()) {
++        ue_wide_mfbr_capped = true;
++        break;
++      }
++    }
++    slices.at(*slice_id).pending_ul_ues.set(ue_cfg.ue_index, slice_pending_bytes > 0 or ue_wide_mfbr_capped);
+   }
+ }
+ 
+@@ -783,7 +802,14 @@ unsigned logical_channel_system::allocate_mac_sdu(
+   // negligible cost otherwise - see \c ue_bitrate_limiter). This is enforced as just another ceiling on
+   // \c rem_bytes, the same conceptual role played by the existing UE-aggregate bitrate cap in
+   // grant_params_selector.cpp - it composes with it automatically since both ultimately bound the same value.
+-  rem_bytes = std::min(rem_bytes, ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx));
++  const unsigned pre_clamp_rem_bytes = rem_bytes;
++  const unsigned mfbr_budget         = ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx);
++  rem_bytes = std::min(rem_bytes, mfbr_budget);
++  if (ch_ctx.mbr_limiter.is_capped()) {
++    srslog::fetch_basic_logger("SCHED").info(
++        "DIAG-DL-ALLOC lcid={} sl_tx={}: pre_clamp_rem={} mfbr_budget={} post_clamp_rem={}",
++        static_cast<unsigned>(lcid), sl_tx.valid() ? sl_tx.to_uint() : 0, pre_clamp_rem_bytes, mfbr_budget, rem_bytes);
++  }
+ 
+   const unsigned min_bytes_needed = get_mac_sdu_with_subhdr_and_rlc_hdr_estim(lcid, 1);
+   if (rem_bytes < min_bytes_needed) {
+@@ -984,6 +1010,32 @@ unsigned ue_logical_channel_repository::dl_pending_bytes() const
+   return bytes;
+ }
+ 
++unsigned ue_logical_channel_repository::dl_pending_bytes_mfbr_capped(slot_point sl_tx) const
++{
++  auto u = get_ue_row();
++  if (u.at<ue_context>().fallback_state) {
++    // Fallback (SRB-only) channels are never MFBR-tracked.
++    return pending_con_res_ce_bytes() + pending_bytes(LCID_SRB0) + pending_bytes(LCID_SRB1);
++  }
++  unsigned bytes = pending_ce_bytes();
++  auto&    ue_ch = u.at<ue_channel_context>();
++  for (lcid_t lcid : ue_ch.sorted_channels) {
++    if (lcid == LCID_SRB0) {
++      continue;
++    }
++    const auto& ch_ctx = ue_ch.channels.at(lcid);
++    const unsigned raw_pending = pending_bytes(lcid);
++    const unsigned budget      = ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx);
++    if (ch_ctx.mbr_limiter.is_capped()) {
++      srslog::fetch_basic_logger("SCHED").info(
++          "DIAG-DL lcid={}: raw_pending={} budget_now={} clamped={}",
++          static_cast<unsigned>(lcid), raw_pending, budget, std::min(raw_pending, budget));
++    }
++    bytes += std::min(raw_pending, budget);
++  }
++  return bytes;
++}
++
+ unsigned ue_logical_channel_repository::ul_pending_bytes() const
+ {
+   auto u = get_ue_row();
+@@ -1006,11 +1058,39 @@ unsigned ue_logical_channel_repository::ul_pending_bytes_mfbr_capped(slot_point
+   }
+   unsigned bytes = 0;
+   for (const auto& [lcgid, ul_ch_ctx] : u.at<ue_ul_channel_context>().lcgs) {
+-    bytes += std::min(pending_bytes(lcgid), ul_ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx));
++    unsigned lcg_bytes = std::min(pending_bytes(lcgid), ul_ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx));
++    if (ul_ch_ctx.mbr_limiter.is_capped() and lcg_bytes > 0) {
++      // Reserve a small amount of headroom so an MFBR-capped grant is never sized to an exact byte fit. Unlike
++      // the DL, the gNB has no ground truth of the UE's real UL backlog - it relies on the UE's own BSR reports,
++      // and TS 38.321's Regular BSR only re-triggers when new data arrives at a previously-empty queue (which
++      // won't happen while continuous traffic keeps the queue non-empty). The only other way the UE refreshes
++      // its buffer status is an opportunistic Padding BSR when a grant has leftover space; a tightly-capped
++      // grant sized to an exact byte fit leaves none, so the last-reported (and by then stale) buffer status
++      // never gets updated, and the scheduler ends up indefinitely re-granting the same stale amount instead of
++      // tracking real, continuously-arriving traffic. This headroom is a no-op whenever the LCG isn't actually
++      // MFBR-capped (the common case), since it never applies there.
++      static constexpr unsigned UL_BSR_HEADROOM_BYTES = 4;
++      lcg_bytes += UL_BSR_HEADROOM_BYTES;
++    }
++    bytes += lcg_bytes;
+   }
+   return bytes;
+ }
+ 
++bool ue_logical_channel_repository::has_ul_mfbr_cap() const
++{
++  auto u = get_ue_row();
++  if (u.at<ue_context>().fallback_state) {
++    return false;
++  }
++  for (const auto& [lcgid, ul_ch_ctx] : u.at<ue_ul_channel_context>().lcgs) {
++    if (ul_ch_ctx.active and ul_ch_ctx.mbr_limiter.is_capped()) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ double ue_logical_channel_repository::average_dl_bit_rate(lcid_t lcid) const
+ {
+   auto  u      = get_ue_row();
+diff --git a/lib/scheduler/ue_context/logical_channel_system.h b/lib/scheduler/ue_context/logical_channel_system.h
+index df8251d444..b26806da24 100644
+--- a/lib/scheduler/ue_context/logical_channel_system.h
++++ b/lib/scheduler/ue_context/logical_channel_system.h
+@@ -540,6 +540,11 @@ public:
+   /// \brief Calculates number of DL pending bytes, including MAC header overhead, and taking UE state into account.
+   unsigned dl_pending_bytes() const;
+ 
++  /// \brief Calculates number of DL pending bytes as in \ref dl_pending_bytes(), but with each LCID's contribution
++  /// additionally clamped by that LCID's remaining MFBR budget for \c sl_tx, if a cap is configured (see
++  /// \c dl_logical_channel_context::mbr_limiter). No-op for LCIDs without a configured MFBR.
++  unsigned dl_pending_bytes_mfbr_capped(slot_point sl_tx) const;
++
+   /// \brief Calculates number of UL pending bytes, including MAC header overhead, and taking UE state into account.
+   unsigned ul_pending_bytes() const;
+ 
+@@ -548,6 +553,9 @@ public:
+   /// \c ul_logical_channel_group_context::mbr_limiter). No-op for LCGs without a configured MFBR.
+   unsigned ul_pending_bytes_mfbr_capped(slot_point sl_tx) const;
+ 
++  /// \brief Whether any active UL LCG for this UE has a configured MFBR cap.
++  bool has_ul_mfbr_cap() const;
++
+   /// Calculates the number of DL pending bytes, including MAC header overhead, for a RAN slice.
+   unsigned dl_pending_bytes(ran_slice_id_t slice_id) const
+   {
+diff --git a/lib/scheduler/ue_scheduling/grant_params_selector.cpp b/lib/scheduler/ue_scheduling/grant_params_selector.cpp
+index 1c6d44cb70..eeb1620906 100644
+--- a/lib/scheduler/ue_scheduling/grant_params_selector.cpp
++++ b/lib/scheduler/ue_scheduling/grant_params_selector.cpp
+@@ -275,6 +275,12 @@ static std::optional<dl_sched_context> get_dl_sched_context(const slice_ue&
+       // retransmissions (the "else" branch below) are never throttled, since they carry already-counted data and
+       // skipping them would only waste HARQ processes and hurt reliability.
+       pending_bytes      = std::min(pending_bytes, ue_cc.dl_bitrate_limiter().get_max_grantable_bytes(pdsch_slot));
++      // Per-DRB MFBR cap: additionally clamp by each DRB's own remaining MFBR budget, if configured (no-op
++      // otherwise). Without this, the TBS/PRB size decided here would be driven by the DRB's raw, uncapped
++      // backlog, which keeps growing whenever the offered rate exceeds the cap (only allocate_mac_sdu() enforces
++      // the cap on how much of an already-sized TBS gets filled) - see dl_logical_channel_context::mbr_limiter's
++      // doc comment.
++      pending_bytes = std::min(pending_bytes, u.pending_dl_newtx_bytes_mfbr_capped(pdsch_slot));
+       auto mcs_prbs_sel = compute_newtx_required_mcs_and_prbs(pdsch_cfg, ue_cc, pending_bytes, nof_rb_lims);
+       if (not mcs_prbs_sel.has_value()) {
+         // Note: No point in carrying on.
+@@ -436,19 +442,67 @@ static std::optional<ul_sched_context> get_ul_sched_context(const slice_ue&
+       // Note: We assume k2 <= k1, which means that all the HARQ bits are set at this point for this UL slot and UE.
+       pusch_cfg =
+           compute_newtx_pusch_config_params(ue_cc, dci_type, pusch_td_res, uci_nof_harq_bits, is_csi_report_slot);
++      const unsigned candidate_pending_bytes = pending_bytes;
+       // Throughput cap: clamp the newTx grant to the UE's configured UL bitrate budget for this slot. HARQ
+       // retransmissions (the "else" branch below) are never throttled.
+       pending_bytes = std::min(pending_bytes, ue_cc.ul_bitrate_limiter().get_max_grantable_bytes(pusch_slot));
+       // Per-DRB MFBR cap: additionally clamp by each LCG's own remaining MFBR budget, if configured (no-op
+       // otherwise). This only isolates a single GBR DRB's UL rate when that DRB has an LCG to itself - see
+       // ul_logical_channel_group_context::mbr_limiter's doc comment for why (UL LCP is UE-controlled, TS 38.321).
+-      pending_bytes = std::min(pending_bytes, u.pending_ul_newtx_bytes_mfbr_capped(pusch_slot));
++      const bool     ul_mfbr_capped     = u.has_ul_mfbr_cap();
++      const unsigned ul_mfbr_budget_now = u.pending_ul_newtx_bytes_mfbr_capped(pusch_slot);
++      pending_bytes                     = std::min(pending_bytes, ul_mfbr_budget_now);
++      if (ul_mfbr_capped) {
++        srslog::fetch_basic_logger("SCHED").info(
++            "DIAG ue={} crnti={}: UL newTx candidate_pending={} mfbr_budget_now={} clamped_pending={}",
++            fmt::underlying(ue_cc.ue_index),
++            ue_cc.rnti(),
++            candidate_pending_bytes,
++            ul_mfbr_budget_now,
++            pending_bytes);
++      }
++
++      // PUSCH allocation is fundamentally quantized (TS 38.214 Sec 5.1.3.2): an integer number of PRBs maps to a
++      // discrete TBS from a fixed table - there is no way to grant an arbitrary fractional byte count. When an
++      // MFBR-capped LCG's token bucket has only accumulated a few bytes since the last grant (e.g. a low cap's
++      // per-slot refill is smaller than the smallest efficient PRB/MCS combination available this slot), granting
++      // immediately would systematically overshoot the configured rate every time it happens, because - unlike
++      // DL - the UE fills whatever PRBs it's given with real backlogged data (TS 38.321 UL LCP is UE-controlled,
++      // there is no second gNB-side "fill" clamp to fall back on). Defer instead and let the token bucket's own
++      // 20 ms burst window (see ue_bitrate_limiter's doc comment - it exists exactly to "avoid single-slot grant
++      // starvation/fragmentation") accumulate more credit before granting, rather than forcing an inefficient
++      // grant on every qualifying slot. The periodic BSR-refresh headroom below still fires on schedule regardless
++      // of this deferral, so the feedback loop that depends on it never stalls.
++      static constexpr unsigned UL_MFBR_MIN_EFFICIENT_GRANT_BYTES = 20;
++      static constexpr unsigned UL_MFBR_HEADROOM_PERIOD_MS        = 10;
++      const bool ul_mfbr_headroom_due =
++          (pusch_slot.to_uint() % (pusch_slot.nof_slots_per_subframe() * UL_MFBR_HEADROOM_PERIOD_MS)) == 0;
++      if (ul_mfbr_capped and ul_mfbr_budget_now < UL_MFBR_MIN_EFFICIENT_GRANT_BYTES and not ul_mfbr_headroom_due) {
++        return std::nullopt;
++      }
++
+       auto mcs_prbs_sel = compute_newtx_required_mcs_and_prbs(pusch_cfg, ue_cc, pending_bytes, nof_rb_lims);
+       if (not mcs_prbs_sel.has_value()) {
+         return std::nullopt;
+       }
+       mcs     = mcs_prbs_sel->mcs;
+       nof_rbs = mcs_prbs_sel->nof_prbs;
++      if (ul_mfbr_capped and ul_mfbr_headroom_due and nof_rbs < nof_rb_lims.stop()) {
++        // Guarantee several extra PRBs of headroom beyond the byte-exact size, so an MFBR-capped grant
++        // periodically has *comfortable* spare capacity for a padding BSR MAC CE - see
++        // ul_pending_bytes_mfbr_capped()'s doc comment for why this matters. A single extra PRB was found live to
++        // be an unreliable margin: the UE only opportunistically includes a Padding BSR when leftover space is
++        // clearly worth it (TS 38.321 Sec 5.4.5's "equal to or larger than the size of the Long BSR plus its
++        // subheader" condition, and it competes with any real data also wanting that space), so a marginal excess
++        // was sometimes silently absorbed by more real data instead of a BSR, leaving the staleness problem this
++        // headroom exists to solve unresolved on those occasions. A larger, unambiguous margin makes the UE's
++        // "worth it" decision reliable. Gated on "is this UE UL-MFBR-capped at all" rather than "did the MFBR
++        // clamp technically produce the smaller value this slot", since at very small backlog sizes the two can
++        // be nearly identical and comparing them is not a robust signal - the goal is guaranteeing headroom
++        // whenever the BSR-staleness risk exists, not pinpointing the exact binding constraint.
++        static constexpr unsigned UL_MFBR_HEADROOM_EXTRA_PRBS = 4;
++        nof_rbs = std::min(nof_rbs + UL_MFBR_HEADROOM_EXTRA_PRBS, nof_rb_lims.stop());
++      }
+     } else {
+       // ReTx Case.
+       mcs     = h_ul->get_grant_params().mcs;
+diff --git a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+index d317d9367b..bf3ac09c99 100644
+--- a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
++++ b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+@@ -740,7 +740,21 @@ std::optional<ue_newtx_candidate> intra_slice_scheduler::create_newtx_ul_candida
+   // Check if the UE has pending data to transmit.
+   unsigned pending_bytes = u.pending_ul_newtx_bytes();
+   if (pending_bytes == 0) {
+-    return std::nullopt;
++    // For an MFBR-capped (GBR) LCG, the gNB cannot rely solely on the UE's own SR/BSR-driven request cadence to
++    // sustain the target bitrate: TS 38.321's Regular BSR only re-triggers when new data arrives at a previously
++    // empty queue, and Periodic/Padding BSR both require an existing grant to be transmitted at all - so once the
++    // last-known (possibly stale) backlog estimate reads zero, the UE has no standards-compliant way to
++    // proactively tell the gNB about new data without first being granted something. Waiting passively collapses
++    // grant frequency to whatever cadence the UE's own SR/BSR logic happens to settle into, which is designed for
++    // best-effort responsiveness, not for sustaining a guaranteed bitrate. Proactively keep offering this UE small
++    // probe grants instead, so it always has an immediate opportunity to report an updated buffer status or send
++    // small amounts of real data - this is the scheduler-side analogue of what a Configured Grant (TS 38.321,
++    // Type 1/2) would provide for a GBR flow without relying on SR/BSR at all; that is not implemented here.
++    if (not u.has_ul_mfbr_cap()) {
++      return std::nullopt;
++    }
++    static constexpr unsigned UL_MFBR_PROBE_GRANT_BYTES = 16;
++    pending_bytes = UL_MFBR_PROBE_GRANT_BYTES;
+   }
+ 
+   if (not can_allocate_pusch(u, ue_cc)) {
+diff --git a/tests/unittests/scheduler/ue_context/logical_channel_system_test.cpp b/tests/unittests/scheduler/ue_context/logical_channel_system_test.cpp
+index 7a19ebefa8..62c2cdb6a9 100644
+--- a/tests/unittests/scheduler/ue_context/logical_channel_system_test.cpp
++++ b/tests/unittests/scheduler/ue_context/logical_channel_system_test.cpp
+@@ -329,7 +329,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, no_mac_subpdus_scheduled_if_no_
+ {
+   dl_msg_lc_info subpdu;
+   unsigned       allocated_bytes = ue_lchs.allocate_mac_ce(subpdu, 100000);
+-  allocated_bytes += ue_lchs.allocate_mac_sdu(subpdu, 100000);
++  allocated_bytes += ue_lchs.allocate_mac_sdu(subpdu, 100000, slot_point{});
+   ASSERT_EQ(allocated_bytes, 0);
+ }
+ 
+@@ -397,7 +397,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, mac_sdu_is_scheduled_if_tb_has_
+   do {
+     unsigned       pending_bytes = ue_lchs.total_dl_pending_bytes();
+     dl_msg_lc_info subpdu;
+-    unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, rem_bytes, lcid);
++    unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, rem_bytes, slot_point{}, lcid);
+     assert_ue_lch_valid(ue_lchs);
+     if (not subpdu.lcid.is_valid()) {
+       if (tb_size > RLC_SEGMENTATION_OVERHEAD + MIN_MAC_SDU_SUBHEADER_SIZE) {
+@@ -470,7 +470,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, assign_leftover_bytes_to_sdu_if
+   // ConRes occupies 7 bytes => 6 bytes ConRes CE + 1 bytes header.
+   allocated_bytes += ue_lchs.allocate_ue_con_res_id_mac_ce(subpdu, tb_size);
+   // SRB0 SDU requires at least 298 bytes => 295 payload size + 3 bytes MAC header. Leftover bytes = 4 bytes.
+-  allocated_bytes += ue_lchs.allocate_mac_sdu(subpdu, tb_size - allocated_bytes, LCID_SRB0);
++  allocated_bytes += ue_lchs.allocate_mac_sdu(subpdu, tb_size - allocated_bytes, slot_point{}, LCID_SRB0);
+   // Verify leftover bytes are assigned to the last SDU.
+   ASSERT_EQ(allocated_bytes, tb_size);
+ }
+@@ -483,7 +483,7 @@ TEST_F(single_ue_dl_logical_channel_system_test,
+   dl_msg_lc_info subpdu;
+   assert_ue_lch_valid(ue_lchs);
+   // SRB1 SDU requires 2 bytes of subheader. However, if only 3 bytes were allocated, RLC overhead could not be fitted.
+-  unsigned allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 50, LCID_SRB1);
++  unsigned allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 50, slot_point{}, LCID_SRB1);
+   // Note: The MAC can only estimate the RLC overhead. However, it should always be equal or higher than 2 bytes, which
+   // is the RLC UM header min size.
+   const unsigned min_rlc_ovh = 2;
+@@ -646,11 +646,11 @@ TEST_F(single_ue_dl_logical_channel_system_test, when_sdu_is_scheduled_pending_s
+   ue_lchs.handle_dl_buffer_status_indication(LCID_MIN_DRB, drb1_bytes);
+ 
+   dl_msg_lc_info subpdu;
+-  unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 5000, LCID_SRB1);
++  unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 5000, slot_point{}, LCID_SRB1);
+   ASSERT_EQ(allocated_bytes, get_mac_sdu_required_bytes(srb1_bytes));
+   ASSERT_EQ(ue_lchs.dl_pending_bytes(ran_slice_id_t{0}), 0);
+ 
+-  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 1000, LCID_MIN_DRB);
++  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 1000, slot_point{}, LCID_MIN_DRB);
+   ASSERT_EQ(allocated_bytes, 1000);
+   ASSERT_EQ(ue_lchs.dl_pending_bytes(ran_slice_id_t{1}),
+             get_mac_sdu_required_bytes(drb1_bytes + RLC_SEGMENTATION_OVERHEAD - subpdu.sched_bytes));
+@@ -665,7 +665,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, qos_gbr_bearer_bitrate_is_track
+   ue_lchs.handle_dl_buffer_status_indication(drb_lcid, sdu_size);
+   unsigned       tb_size = sdu_size + 10;
+   dl_msg_lc_info subpdu;
+-  unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, drb_lcid);
++  unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, slot_point{}, drb_lcid);
+   ASSERT_GT(allocated_bytes, 0);
+   ASSERT_TRUE(subpdu.lcid.is_valid());
+   ASSERT_EQ(subpdu.lcid, drb_lcid);
+@@ -688,7 +688,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, qos_gbr_bearer_bitrate_is_track
+   // QoS GBR bearer should now track bitrate.
+   ue_lchs.handle_dl_buffer_status_indication(drb_lcid, sdu_size);
+   subpdu          = {};
+-  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, drb_lcid);
++  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, slot_point{}, drb_lcid);
+   ASSERT_GT(allocated_bytes, 0);
+   ASSERT_EQ(subpdu.lcid, drb_lcid);
+   ASSERT_EQ(get_mac_sdu_required_bytes(subpdu.sched_bytes), allocated_bytes);
+@@ -699,7 +699,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, qos_gbr_bearer_bitrate_is_track
+   ue_lchs.configure(this->create_lcid_config(lcids));
+   ue_lchs.handle_dl_buffer_status_indication(drb_lcid, sdu_size);
+   subpdu          = {};
+-  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, drb_lcid);
++  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, slot_point{}, drb_lcid);
+   ASSERT_GT(allocated_bytes, 0);
+   lch_system.slot_indication();
+   ASSERT_EQ(ue_lchs.average_dl_bit_rate(drb_lcid), 0);
+@@ -709,6 +709,69 @@ TEST_F(single_ue_dl_logical_channel_system_test, qos_gbr_bearer_bitrate_is_track
+   ASSERT_EQ(lch_system.nof_logical_channels(), 3) << "Reconfigurations created extra logical channels";
+ }
+ 
++TEST_F(single_ue_dl_logical_channel_system_test, dl_pending_bytes_mfbr_capped_is_a_no_op_when_no_mfbr_is_configured)
++{
++  const lcid_t   drb_lcid = LCID_MIN_DRB;
++  const unsigned buf_st   = 10000;
++  ue_lchs.handle_dl_buffer_status_indication(drb_lcid, buf_st);
++
++  const slot_point sl_tx{to_numerology_value(subcarrier_spacing::kHz30), 0};
++  ASSERT_EQ(ue_lchs.dl_pending_bytes_mfbr_capped(sl_tx), ue_lchs.dl_pending_bytes());
++}
++
++TEST_F(single_ue_dl_logical_channel_system_test, dl_pending_bytes_mfbr_capped_clamps_large_backlog_to_the_mfbr_budget)
++{
++  const lcid_t drb_lcid = LCID_MIN_DRB;
++
++  // Configure a GBR DRB with a low DL MFBR (800 kbps).
++  std::vector<logical_channel_config> configs;
++  for (lcid_t lcid : lcids) {
++    configs.push_back(config_helpers::create_default_logical_channel_config(lcid));
++    if (not is_srb(lcid)) {
++      configs.back().qos.emplace();
++      configs.back().qos->qos.average_window_ms         = 100;
++      configs.back().qos->gbr_qos_info.emplace();
++      configs.back().qos->gbr_qos_info->max_br_dl = 800000; // 800 kbps, in bps.
++    }
++  }
++  ue_lchs.configure(cfg_pool.create(configs));
++
++  // Report a large backlog, well beyond what a low-kbps cap's burst allowance can carry in one slot.
++  const unsigned buf_st = 10000;
++  ue_lchs.handle_dl_buffer_status_indication(drb_lcid, buf_st);
++
++  const slot_point sl_tx{to_numerology_value(subcarrier_spacing::kHz30), 0};
++  const unsigned    uncapped_bytes = ue_lchs.dl_pending_bytes();
++  const unsigned    capped_bytes   = ue_lchs.dl_pending_bytes_mfbr_capped(sl_tx);
++  ASSERT_LT(capped_bytes, uncapped_bytes) << "MFBR cap should bind for a backlog this large";
++  ASSERT_GT(capped_bytes, 0);
++}
++
++TEST_F(single_ue_dl_logical_channel_system_test, dl_pending_bytes_mfbr_capped_does_not_clamp_a_small_backlog)
++{
++  const lcid_t drb_lcid = LCID_MIN_DRB;
++
++  // Configure a GBR DRB with a generous DL MFBR (50 Mbps).
++  std::vector<logical_channel_config> configs;
++  for (lcid_t lcid : lcids) {
++    configs.push_back(config_helpers::create_default_logical_channel_config(lcid));
++    if (not is_srb(lcid)) {
++      configs.back().qos.emplace();
++      configs.back().qos->qos.average_window_ms         = 100;
++      configs.back().qos->gbr_qos_info.emplace();
++      configs.back().qos->gbr_qos_info->max_br_dl = 50000000; // 50 Mbps, in bps.
++    }
++  }
++  ue_lchs.configure(cfg_pool.create(configs));
++
++  // Report a small backlog, comfortably within the burst allowance of a generous cap.
++  const unsigned buf_st = 100;
++  ue_lchs.handle_dl_buffer_status_indication(drb_lcid, buf_st);
++
++  const slot_point sl_tx{to_numerology_value(subcarrier_spacing::kHz30), 0};
++  ASSERT_EQ(ue_lchs.dl_pending_bytes_mfbr_capped(sl_tx), ue_lchs.dl_pending_bytes());
++}
++
+ class multi_ue_dl_logical_channel_system_test : public logical_channel_system_test, public ::testing::Test
+ {};
+ 

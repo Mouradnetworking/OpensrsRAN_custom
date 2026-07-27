@@ -364,6 +364,18 @@ void logical_channel_system::configure(soa::row_id ue_rid, logical_channel_confi
         mfbr_ul_kbps = static_cast<unsigned>(max_br_ul_bps / 1000);
       }
       ul_ch_ctx.mbr_limiter.set_cap(mfbr_ul_kbps);
+      srslog::fetch_basic_logger("SCHED").info(
+          "lcid={}: MFBR UL cap {}",
+          static_cast<unsigned>(ch_cfg->lcid),
+          mfbr_ul_kbps.has_value() ? std::to_string(*mfbr_ul_kbps) + "kbps" : "none");
+      if (mfbr_ul_kbps.has_value() and ul_ch_ctx.slice_id.has_value()) {
+        // An MFBR-capped UL LCG must always remain a schedulable candidate, even when its last-known BSR-derived
+        // backlog reads zero - otherwise the scheduler can never grant it the PUSCH resource needed to report an
+        // updated buffer status in the first place (TS 38.321's Regular/Periodic BSR both require an existing
+        // grant to be transmitted at all), stalling the GBR flow's feedback loop entirely between SR
+        // opportunities. See ue_logical_channel_repository::has_ul_mfbr_cap()'s doc comment.
+        slices.at(*ul_ch_ctx.slice_id).pending_ul_ues.set(ue_cfg.ue_index, true);
+      }
     } else {
       // Remove from QoS tracking.
       if (ch_ctx.qos_row.has_value()) {
@@ -677,7 +689,18 @@ void logical_channel_system::on_single_lcg_buf_st_update(ue_row&                
   if ((prev_slice_pending_bytes > 0) != (slice_pending_bytes > 0)) {
     // zero crossing detected. Update the slice UE with pending data bitmap.
     auto& ue_cfg = u.at<ue_config_context>();
-    slices.at(*slice_id).pending_ul_ues.set(ue_cfg.ue_index, slice_pending_bytes > 0);
+    // An MFBR-capped UL LCG must always remain a schedulable candidate, even when this LCG's own backlog just
+    // crossed down to zero - see the matching comment in configure() for why. Preserve the bit here rather than
+    // letting a legitimate zero-crossing on this LCG clear it if some other LCG on the UE (or this same one, once
+    // more data arrives) is still MFBR-capped.
+    bool ue_wide_mfbr_capped = false;
+    for (const auto& [other_lcgid, other_ul_ch_ctx] : u.at<ue_ul_channel_context>().lcgs) {
+      if (other_ul_ch_ctx.active and other_ul_ch_ctx.mbr_limiter.is_capped()) {
+        ue_wide_mfbr_capped = true;
+        break;
+      }
+    }
+    slices.at(*slice_id).pending_ul_ues.set(ue_cfg.ue_index, slice_pending_bytes > 0 or ue_wide_mfbr_capped);
   }
 }
 
@@ -783,7 +806,8 @@ unsigned logical_channel_system::allocate_mac_sdu(
   // negligible cost otherwise - see \c ue_bitrate_limiter). This is enforced as just another ceiling on
   // \c rem_bytes, the same conceptual role played by the existing UE-aggregate bitrate cap in
   // grant_params_selector.cpp - it composes with it automatically since both ultimately bound the same value.
-  rem_bytes = std::min(rem_bytes, ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx));
+  const unsigned mfbr_budget = ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx);
+  rem_bytes = std::min(rem_bytes, mfbr_budget);
 
   const unsigned min_bytes_needed = get_mac_sdu_with_subhdr_and_rlc_hdr_estim(lcid, 1);
   if (rem_bytes < min_bytes_needed) {
@@ -984,6 +1008,27 @@ unsigned ue_logical_channel_repository::dl_pending_bytes() const
   return bytes;
 }
 
+unsigned ue_logical_channel_repository::dl_pending_bytes_mfbr_capped(slot_point sl_tx) const
+{
+  auto u = get_ue_row();
+  if (u.at<ue_context>().fallback_state) {
+    // Fallback (SRB-only) channels are never MFBR-tracked.
+    return pending_con_res_ce_bytes() + pending_bytes(LCID_SRB0) + pending_bytes(LCID_SRB1);
+  }
+  unsigned bytes = pending_ce_bytes();
+  auto&    ue_ch = u.at<ue_channel_context>();
+  for (lcid_t lcid : ue_ch.sorted_channels) {
+    if (lcid == LCID_SRB0) {
+      continue;
+    }
+    const auto& ch_ctx = ue_ch.channels.at(lcid);
+    const unsigned raw_pending = pending_bytes(lcid);
+    const unsigned budget      = ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx);
+    bytes += std::min(raw_pending, budget);
+  }
+  return bytes;
+}
+
 unsigned ue_logical_channel_repository::ul_pending_bytes() const
 {
   auto u = get_ue_row();
@@ -1006,9 +1051,37 @@ unsigned ue_logical_channel_repository::ul_pending_bytes_mfbr_capped(slot_point 
   }
   unsigned bytes = 0;
   for (const auto& [lcgid, ul_ch_ctx] : u.at<ue_ul_channel_context>().lcgs) {
-    bytes += std::min(pending_bytes(lcgid), ul_ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx));
+    unsigned lcg_bytes = std::min(pending_bytes(lcgid), ul_ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx));
+    if (ul_ch_ctx.mbr_limiter.is_capped() and lcg_bytes > 0) {
+      // Reserve a small amount of headroom so an MFBR-capped grant is never sized to an exact byte fit. Unlike
+      // the DL, the gNB has no ground truth of the UE's real UL backlog - it relies on the UE's own BSR reports,
+      // and TS 38.321's Regular BSR only re-triggers when new data arrives at a previously-empty queue (which
+      // won't happen while continuous traffic keeps the queue non-empty). The only other way the UE refreshes
+      // its buffer status is an opportunistic Padding BSR when a grant has leftover space; a tightly-capped
+      // grant sized to an exact byte fit leaves none, so the last-reported (and by then stale) buffer status
+      // never gets updated, and the scheduler ends up indefinitely re-granting the same stale amount instead of
+      // tracking real, continuously-arriving traffic. This headroom is a no-op whenever the LCG isn't actually
+      // MFBR-capped (the common case), since it never applies there.
+      static constexpr unsigned UL_BSR_HEADROOM_BYTES = 4;
+      lcg_bytes += UL_BSR_HEADROOM_BYTES;
+    }
+    bytes += lcg_bytes;
   }
   return bytes;
+}
+
+bool ue_logical_channel_repository::has_ul_mfbr_cap() const
+{
+  auto u = get_ue_row();
+  if (u.at<ue_context>().fallback_state) {
+    return false;
+  }
+  for (const auto& [lcgid, ul_ch_ctx] : u.at<ue_ul_channel_context>().lcgs) {
+    if (ul_ch_ctx.active and ul_ch_ctx.mbr_limiter.is_capped()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 double ue_logical_channel_repository::average_dl_bit_rate(lcid_t lcid) const

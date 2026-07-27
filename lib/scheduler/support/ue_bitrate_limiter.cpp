@@ -67,6 +67,13 @@ void ue_bitrate_limiter::consume(slot_point sl_tx, unsigned bytes_granted)
   if (not cap_kbps.has_value()) {
     return;
   }
-  tokens_bytes      = std::max(0.0, tokens_available_at(sl_tx) - static_cast<double>(bytes_granted));
+  // Deliberately not floored at 0: PRB/TBS allocation is inherently quantized (an integer number of PRBs maps to
+  // a discrete TBS from a fixed table, TS 38.214 Sec 5.1.3.2), so a granted TBS can legitimately exceed the
+  // available token budget by a small, unavoidable rounding amount. Letting the balance go negative here means
+  // that "debt" is correctly repaid out of future refills before positive budget accumulates again, keeping the
+  // long-run average rate converging on the configured cap. Flooring at 0 instead would silently forgive every
+  // such overshoot, systematically biasing the delivered rate above the cap - most noticeably for low caps and
+  // grant patterns with less "wiggle room" to average out over.
+  tokens_bytes      = tokens_available_at(sl_tx) - static_cast<double>(bytes_granted);
   last_update_slot = sl_tx;
 }

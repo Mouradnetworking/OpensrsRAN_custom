@@ -216,7 +216,9 @@ bool srsran::srs_cu_cp::fill_rrc_reconfig_args(
     rrc_recfg_v1530_ies.master_key_upd.value().next_hop_chaining_count = ncc.value(); // TODO: remove hard-coded value
   }
 
-  rrc_reconfig_args.non_crit_ext = rrc_recfg_v1530_ies;
+  if (rrc_recfg_v1530_ies.contains_values()) {
+    rrc_reconfig_args.non_crit_ext = rrc_recfg_v1530_ies;
+  }
 
   if (radio_bearer_config.contains_values()) {
     // Fill radio bearer config.

@@ -540,6 +540,11 @@ public:
   /// \brief Calculates number of DL pending bytes, including MAC header overhead, and taking UE state into account.
   unsigned dl_pending_bytes() const;
 
+  /// \brief Calculates number of DL pending bytes as in \ref dl_pending_bytes(), but with each LCID's contribution
+  /// additionally clamped by that LCID's remaining MFBR budget for \c sl_tx, if a cap is configured (see
+  /// \c dl_logical_channel_context::mbr_limiter). No-op for LCIDs without a configured MFBR.
+  unsigned dl_pending_bytes_mfbr_capped(slot_point sl_tx) const;
+
   /// \brief Calculates number of UL pending bytes, including MAC header overhead, and taking UE state into account.
   unsigned ul_pending_bytes() const;
 
@@ -547,6 +552,9 @@ public:
   /// additionally clamped by that LCG's remaining MFBR budget for \c sl_tx, if a cap is configured (see
   /// \c ul_logical_channel_group_context::mbr_limiter). No-op for LCGs without a configured MFBR.
   unsigned ul_pending_bytes_mfbr_capped(slot_point sl_tx) const;
+
+  /// \brief Whether any active UL LCG for this UE has a configured MFBR cap.
+  bool has_ul_mfbr_cap() const;
 
   /// Calculates the number of DL pending bytes, including MAC header overhead, for a RAN slice.
   unsigned dl_pending_bytes(ran_slice_id_t slice_id) const

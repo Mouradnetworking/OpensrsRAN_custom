@@ -1,0 +1,143 @@
+Category 1 – "Is this even novel?" (expect this, have it crisp)
+
+Q: Isn't this just implementing something 3GPP already specifies? What's the actual research contribution?
+A: The QoS semantics aren't novel — 3GPP already mandates dual enforcement. The contribution is: (1) actually implementing the RAN-side half in a real stack where it existed only as signaled state before; (2) exposing it through the standard O-RAN action, not a vendor hack; (3) finding and fixing three real conformance defects in shared signaling code that any core-driven trigger would also hit; (4) the control-theoretic characterization (open-loop vs. closed-loop) explaining why this differs from PRB-quota-style control; (5) the reconciliation-gap finding. It's a systems/implementation contribution plus an architectural finding, not a new algorithm.
+
+Q: Token-bucket rate limiting is decades old. Where's the novelty in the mechanism itself?
+A: None claimed — we reuse a pre-existing token bucket rather than inventing one. The contribution is where it's applied (DU MAC scheduler, per-slot, radio-aware) and how it's exposed (standard control action), not the algorithm.
+
+Q: Does any commercial vendor already implement Style 1/Action 1?
+A: Be honest you don't know — you checked OpenAirInterface's E2 agent specifically and found it registers Action 2 but not Action 1, which is some evidence of under-implementation in the open ecosystem, but you have no visibility into commercial/certified implementations.
+
+Category 2 – Mechanism and design choices
+
+Q: Why token bucket and not leaky bucket / sliding window?
+A: Reused existing validated infrastructure rather than designing from scratch; token bucket's burst allowance also naturally absorbs PRB/TBS quantization (you can't grant fractional bytes). No comparative study against alternatives was done — fair to name as future work if pushed.
+
+Q: Why is UL only exact with a dedicated LCG — why not fix Logical Channel Prioritization to be gNB-controlled?
+A: This is a hard TS 38.321 protocol constraint, not an implementation gap — UL LCP runs in the UE by design. "Fixing" it would mean deviating from the MAC spec itself, not patching a bug.
+
+Q: How do multiple GBR DRBs on one UE interact — is there cross-DRB fairness?
+A: Each DRB has its own independent token bucket; pre-existing QoS-weighting logic handles prioritization at grant time, but this wasn't specifically validated with multiple simultaneous GBR DRBs contending. Good opening to mention the two-DRB experiment as planned future work.
+
+Q: What's the CPU/latency overhead of the per-slot enforcement check?
+A: Not profiled. It's an O(1) arithmetic clamp added to an already-existing per-slot path, so asymptotic complexity is unchanged, but you don't have a measured number — say so plainly if asked, don't guess a figure.
+
+Category 3 – Evaluation rigor (expect real pushback here)
+
+Q: Single UE, ZMQ loopback — how do you know this generalizes to real RF and multiple UEs?
+A: Already in your Limitations section: no known architectural reason it wouldn't (mechanism is explicitly RF-agnostic, scheduler-internal only), but not empirically confirmed, and you say so directly rather than asserting it.
+
+Q: Are these single-run results, or averaged over repeated trials with confidence intervals?
+A: This is the one to fix before submission, not just rehearse an answer for. If your current numbers are single runs, a top-tier venue reviewer will flag this immediately. I'd recommend re-running your key configurations (at minimum the UL 300/3000/8000 kbps points) 3–5 times each and reporting mean ± std or a CI before you submit, not just at presentation time.
+
+
+Q: Why only one DL cap value, when you tested three for UL?
+A: Direct answer, no hedging: because of the DL reconfiguration crash — a second DL cap change destabilizes the connection, so you could only validate one value per session. State this as exactly why the DL matrix is incomplete, not as an evaluation oversight.
+
+Q: Is 60–180 seconds "sustained" enough to claim convergence?
+A: Reasonable but modest; longer soak testing (hours) would strengthen the claim and wasn't done here due to time — fine to concede this plainly.
+
+Category 4 – The DL crash (this will get the most scrutiny of anything in the talk)
+
+Q: You disclose an unresolved crash in your own system. Doesn't that undermine the core claim?
+A: No — be confident here, not defensive. The crash is specific to the reconfiguration transition, not the enforcement mechanism, which is proven correct in isolation in both directions. Disclosing a known, well-scoped limitation is what responsible systems research does; hiding it would be the actual credibility problem.
+
+Q: What's your root-cause hypothesis, and why isn't it confirmed?
+A: A code comment found during investigation suggests the reference UE's RLC layer doesn't support in-place reconfiguration of an already-active bearer. Confirming it requires checking one specific log line at the moment of a second reconfiguration — that check hadn't been completed as of writing. Frame it as a precise, falsifiable next step, not a shrug.
+
+Q: Why does this only happen on DL, not UL, if they share signaling infrastructure?
+A: Be careful not to overclaim precision here — DL and UL share much of the CU-CP/E1AP/F1AP chain, but the UL fixes in this work were scheduler-side plus a UE-side BSR-packing change, not a bearer/RLC reconfiguration change, whereas the DL crash trace specifically implicated RRC/RLC bearer interaction. If asked for more precision than that, say you'd need to check before answering further rather than guessing.
+
+Q: Could this be a bug in your new code rather than a pre-existing UE issue?
+A: You have a real answer: reproduced identically on a freshly-restarted UE with zero prior MFBR state, which rules out an accumulated-state bug in your new code as the sole cause; and the RLC comment describing the limitation predates this work and isn't MFBR-specific.
+
+
+Q: GFBR isn't enforced — isn't "Guaranteed" in GBR misleading if you only implement the ceiling?
+
+A: Yes. Only the upper bound (the ceiling) is enforced in the current implementation. The paper explicitly states that full GBR support—enforcing both the ceiling and the minimum guaranteed rate (floor)—requires additional scheduler-priority mechanisms. This is identified as future work rather than claimed as a completed contribution.
+
+Category 5 – The Reconciliation Gap
+
+(Your most novel claim—and likely the one reviewers will probe most thoroughly.)
+
+Q: Isn't the statement that "the RIC has no core-facing interface" already common knowledge? Why is this a research contribution?
+
+A: The architectural fact itself is not new. The contribution lies in connecting this limitation directly to QoS enforcement and, more importantly, quantifying its operational impact. Specifically, the paper demonstrates that traffic may traverse the N3 interface only to be discarded at the RAN because the near-RT RIC lacks visibility into the core network's QoS state. Based on the literature and patent survey, this consequence has not previously been explicitly demonstrated or framed in this way.
+
+Q: Why didn't you simply design the missing interface yourself?
+
+A: That was intentionally outside the scope of this work. Defining a new interface would require protocol design, security and trust considerations, and standardization across multiple organizations (e.g., 3GPP and the O-RAN Alliance). The objective of this paper is to rigorously establish and validate the existence of the problem. Designing and standardizing a solution is left as future work.
+
+Q: Isn't NWDAF the obvious solution? Why didn't you propose using it?
+
+A: NWDAF is indeed a promising candidate and was considered during this work. However, while NWDAF is standardized, it currently has no defined interface to or from the near-RT RIC through the E2 framework. As a result, it cannot serve as an immediate solution. Instead, it represents a plausible future integration point. It would strengthen the paper to explicitly mention NWDAF as a future research direction if it is not already included.
+
+Q: Have you engaged with the O-RAN Alliance or submitted a standards contribution on this topic?
+
+A: No. That is an appropriate and honest answer. The natural next step, following the identification and validation of this architectural gap, would be engagement with the relevant standards bodies (e.g., the O-RAN Alliance and potentially 3GPP). Such standardization activities are beyond the scope of the present work.
+
+
+Category 6 – The Sharpest "Gotcha" Questions
+
+(These are likely to test the robustness of your argument rather than your implementation.)
+
+Q: If the core network is unaware of the RIC's policy changes, doesn't that make your system unsafe to deploy?
+
+A: No. "Unsafe" is not the appropriate characterization. MFBR represents an upper bound on the permitted data rate. Tightening that limit below the value authorized by the core network is a conservative action: it can only reduce the delivered service and can never grant more bandwidth than the core originally authorized. Therefore, the architectural limitation identified in this work leads to inefficiency—specifically, unnecessary transport of traffic that is ultimately discarded at the RAN—rather than a safety or correctness violation. No UE ever receives more resources than the core network permits.
+
+Q: Under stable network conditions, your own results show that PRB Quota can perform similarly to your mechanism. Why, then, is Style 1/Action 1 necessary?
+
+A: The answer has two parts.
+
+First, the similarity holds only under stable radio conditions. Once channel conditions vary, the two approaches diverge. PRB Quota is an open-loop resource allocation mechanism, whereas Style 1/Action 1 forms a closed-loop control system that continuously adjusts enforcement based on measured throughput. The varying-channel experiments illustrate this distinction.
+
+Second, and more fundamentally, Style 1/Action 1 directly enforces the UE's negotiated QoS contract. PRB Quota merely allocates a proportion of radio resources, whose resulting throughput depends on channel quality. For applications such as SLA enforcement, differentiated service tiers, or contractual guarantees, operators require enforcement based on the negotiated data rate—not simply a resource allocation that happens to produce a similar throughput under favorable conditions.
+
+Q: Why should I trust your three bug-fix contributions without validation using third-party equipment or a standardized conformance test suite?
+
+A: It is reasonable to acknowledge that the observed manifestations were validated using a single reference UE rather than a certified conformance test suite or multiple commercial devices. However, the root causes of all three issues reside entirely within the gNB implementation, specifically in the CU-CP software. These defects are independent of the attached UE; the UE only influences how the symptoms become visible. Consequently, while broader validation would strengthen the empirical evaluation, it does not alter the correctness of the identified software defects or the proposed fixes.
+
+
+Category 7 – Likely Questions with Lower Stakes
+
+(Important to answer well, but unlikely to be central to the evaluation.)
+
+Q: Could this approach be applied to 4G/LTE networks?
+
+A: Conceptually, yes. LTE's EPS architecture also supports GBR and MFBR bearers, so the underlying principle of enforcing bearer-specific QoS remains applicable. However, this work was neither implemented nor experimentally validated in an LTE environment. Therefore, any claim of applicability should be presented as a conceptual extension rather than a demonstrated result.
+
+Q: Is this work relevant to future 6G networks?
+
+A: The broader architectural concepts are likely to remain relevant. Radio-aware QoS enforcement, programmable RAN intelligence, and standardized interfaces between network functions are expected to continue playing important roles in future mobile systems. However, because 6G standards are still under development, it would be inappropriate to make specific claims about how this mechanism would integrate into future architectures. The contribution should therefore be framed as addressing a challenge that is likely to persist rather than predicting future standardization.
+
+Q: Is your implementation production-ready?
+
+A: No. This work is a research prototype designed to validate the proposed mechanism and demonstrate its correctness under controlled experimental conditions. It was not developed as a production-grade system, and aspects such as robustness, scalability, operational management, and comprehensive testing remain outside the scope of this research.
+
+Q: Could a malicious xApp exploit this mechanism to intentionally degrade a user's service?
+
+A: That is a valid security consideration, but it falls outside the scope of this work. Access control for xApps is governed by the RIC platform's authentication, authorization, and subscription mechanisms. This research assumes a trusted execution environment for authorized xApps and focuses exclusively on QoS enforcement. Investigating secure policy authorization and zero-trust architectures for the RIC would be a valuable direction for future research.
+
+Q: What happens if two xApps—or an xApp and the core network—issue conflicting QoS updates simultaneously?
+
+A: The current implementation follows the scheduler's existing configuration semantics, where the most recent configuration update takes precedence. Multi-actor conflict detection and resolution were not explicitly investigated in this work. In fact, this limitation reinforces one of the paper's central observations: the lack of a standardized reconciliation mechanism between the core network and the RIC. A complete reconciliation framework would need to address policy conflicts, consistency, and precedence among multiple control entities.
+
+Final Improvements Before Your Defense
+
+These are improvements worth making to the paper itself—not just points to rehearse.
+
+1. Include Confidence Intervals or Repeated Experimental Trials
+
+If the reported performance results are based on single experimental runs, reviewers may question their statistical reliability. Including repeated measurements, confidence intervals, or error bars would significantly strengthen the empirical evaluation and reduce concerns about reproducibility.
+
+2. Explicitly Include NWDAF as Future Work
+
+Your justification regarding NWDAF is technically sound, but it should appear explicitly in the paper rather than relying solely on your oral defense. Stating that NWDAF represents a promising future integration point demonstrates awareness of the broader 5G architecture while clearly acknowledging that no standardized near-RT RIC interface currently exists.
+
+
+
+
+
+
+

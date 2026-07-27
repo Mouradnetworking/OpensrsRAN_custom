@@ -48,12 +48,14 @@ void f1ap_du_ue_context_modification_procedure::operator()(coro_context<async_ta
   create_du_request(req);
   CORO_AWAIT_VALUE(du_response, ue.du_handler.request_ue_context_update(du_request));
 
-  // Set that the UE has a pending RRC configuration.
-  ue.context.rrc_state = f1ap_ue_context::ue_rrc_state::config_pending;
-
   // "If the UE CONTEXT MODIFICATION REQUEST message contains the RRC-Container IE, the gNB-DU shall send the
   // corresponding RRC message to the UE."
   if (du_response.result and req->rrc_container_present) {
+    // Set that the UE has a pending RRC configuration. request_ue_context_update() above puts the scheduler into
+    // fallback mode for the duration; it only leaves fallback once the UE replies with a new uplink RRC message
+    // (see f1c_other_srb_du_bearer::handle_sdu()), which is only guaranteed to happen because we are actually
+    // sending it something new to react to below.
+    ue.context.rrc_state = f1ap_ue_context::ue_rrc_state::config_pending;
     CORO_AWAIT_VALUE(bool result, handle_rrc_container());
     if (not result and req->rrc_delivery_status_request_present) {
       // Note: Even if lower layers do not notify RRC container delivery, the procedure moves forward. We can rely on
@@ -62,7 +64,16 @@ void f1ap_du_ue_context_modification_procedure::operator()(coro_context<async_ta
           "{}: Ignoring RRC Delivery status request. Cause: Lower layers have not confirmed RRC container delivery",
           f1ap_log_prefix{ue.context, name()});
     }
+  } else if (du_response.result) {
+    // No RRC container this time - e.g. a QoS-flow-parameter-only update (such as a new MFBR) that correctly ended
+    // up with nothing for the UE to reconfigure (see fill_rrc_reconfig_args()'s "signal only deltas" gating - TS
+    // 38.331 clauses 5.3.5.6.1/5.3.5.6.5). There is nothing for the UE to confirm, so the scheduler must not be
+    // left waiting in fallback mode (entered as part of request_ue_context_update() above) for a UL RRC message
+    // that will never arrive as a reaction to this specific request - confirm immediately instead.
+    ue.du_handler.on_ue_config_applied(ue.context.ue_index);
   }
+  // else: du_response.result is false (the DU-side update itself failed) - send_ue_context_modification_failure()
+  // below reports this to the CU-CP; nothing was "applied" here to confirm.
 
   if (req->tx_action_ind_present) {
     // "If the UE CONTEXT MODIFICATION REQUEST message contains the Transmission Action Indicator IE, the gNB-DU

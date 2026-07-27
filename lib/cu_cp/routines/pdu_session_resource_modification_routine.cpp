@@ -188,7 +188,20 @@ void pdu_session_resource_modification_routine::operator()(
       }
     }
 
-    CORO_AWAIT_VALUE(rrc_reconfig_result, rrc_ue->handle_rrc_reconfiguration_request(rrc_reconfig_args));
+    // Only go through the RRC round-trip if the request actually carries something for the UE to act on. A
+    // QoS-flow-parameter-only update (e.g. a new MFBR with no 5QI/PDCP/SDAP change and no measurement update)
+    // can legitimately end up with a fully empty request here; per the TS 38.331 "signal only deltas" principle,
+    // that means there is nothing to reconfigure and the RRCReconfiguration exchange should be skipped entirely.
+    rrc_reconfig_has_content =
+        rrc_reconfig_args.radio_bearer_cfg.has_value() || !rrc_reconfig_args.secondary_cell_group.empty() ||
+        rrc_reconfig_args.meas_cfg.has_value() || !rrc_reconfig_args.meas_gap_cfg.empty() ||
+        rrc_reconfig_args.non_crit_ext.has_value();
+
+    if (rrc_reconfig_has_content) {
+      CORO_AWAIT_VALUE(rrc_reconfig_result, rrc_ue->handle_rrc_reconfiguration_request(rrc_reconfig_args));
+    } else {
+      rrc_reconfig_result = true;
+    }
 
     // Handle RRCReconfiguration result.
     if (!handle_rrc_reconfiguration_response(response_msg, modify_request, rrc_reconfig_result, logger)) {
@@ -359,6 +372,10 @@ static bool update_modify_list_with_bearer_ctxt_mod_response(
 
       f1ap_drb_to_modify drb_modify_item;
       drb_modify_item.drb_id = drb_id;
+      // ULUPTNLInformation-ToBeSetup-List is mandatory (min size 1) in F1AP's DRBs-ToBeModified-Item, but the F1-U
+      // UL tunnel itself is unchanged by a QoS-only modification (e.g. a new MFBR) - CU-UP doesn't reassign it, so
+      // reuse the DRB's existing, already-allocated UL TNL info rather than leaving this empty.
+      drb_modify_item.uluptnl_info_list = next_drb_config.ul_up_tnl_info_to_be_setup_list;
       drb_modify_item.qos_info.emplace();
       drb_modify_item.qos_info->drb_qos = next_drb_config.qos_params;
       drb_modify_item.qos_info->s_nssai = next_drb_config.s_nssai;

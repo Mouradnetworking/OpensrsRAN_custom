@@ -823,7 +823,12 @@ void rlc_am_nr_tx::handle_control_pdu(uint8_t* payload, uint32_t nof_bytes)
    *   - if t-PollRetransmit is running:
    *     - stop and reset t-PollRetransmit.
    */
-  if (tx_mod_base_nr(st.poll_sn) < tx_mod_base_nr(status.ack_sn)) {
+  // tx_mod_base_nr() is anchored to the *current* tx_next_ack and is only meaningful for SNs still inside the
+  // TX window (see inside_tx_window()); if POLL_SN was never refreshed by a later poll while tx_next_ack kept
+  // advancing (e.g. sustained backpressure with periodic polling disabled), it falls behind the window and its
+  // modular distance wraps close to mod_nr, making it look "ahead" of ACK_SN instead of long since acknowledged.
+  // Treat that stale case as already-acknowledged too.
+  if (not inside_tx_window(st.poll_sn) or tx_mod_base_nr(st.poll_sn) < tx_mod_base_nr(status.ack_sn)) {
     if (poll_retransmit_timer.is_running()) {
       RlcDebug("Received ACK or NACK for POLL_SN=%d. Stopping t-PollRetransmit", st.poll_sn);
       poll_retransmit_timer.stop();

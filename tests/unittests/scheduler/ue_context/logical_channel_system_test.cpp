@@ -329,7 +329,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, no_mac_subpdus_scheduled_if_no_
 {
   dl_msg_lc_info subpdu;
   unsigned       allocated_bytes = ue_lchs.allocate_mac_ce(subpdu, 100000);
-  allocated_bytes += ue_lchs.allocate_mac_sdu(subpdu, 100000);
+  allocated_bytes += ue_lchs.allocate_mac_sdu(subpdu, 100000, slot_point{});
   ASSERT_EQ(allocated_bytes, 0);
 }
 
@@ -397,7 +397,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, mac_sdu_is_scheduled_if_tb_has_
   do {
     unsigned       pending_bytes = ue_lchs.total_dl_pending_bytes();
     dl_msg_lc_info subpdu;
-    unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, rem_bytes, lcid);
+    unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, rem_bytes, slot_point{}, lcid);
     assert_ue_lch_valid(ue_lchs);
     if (not subpdu.lcid.is_valid()) {
       if (tb_size > RLC_SEGMENTATION_OVERHEAD + MIN_MAC_SDU_SUBHEADER_SIZE) {
@@ -470,7 +470,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, assign_leftover_bytes_to_sdu_if
   // ConRes occupies 7 bytes => 6 bytes ConRes CE + 1 bytes header.
   allocated_bytes += ue_lchs.allocate_ue_con_res_id_mac_ce(subpdu, tb_size);
   // SRB0 SDU requires at least 298 bytes => 295 payload size + 3 bytes MAC header. Leftover bytes = 4 bytes.
-  allocated_bytes += ue_lchs.allocate_mac_sdu(subpdu, tb_size - allocated_bytes, LCID_SRB0);
+  allocated_bytes += ue_lchs.allocate_mac_sdu(subpdu, tb_size - allocated_bytes, slot_point{}, LCID_SRB0);
   // Verify leftover bytes are assigned to the last SDU.
   ASSERT_EQ(allocated_bytes, tb_size);
 }
@@ -483,7 +483,7 @@ TEST_F(single_ue_dl_logical_channel_system_test,
   dl_msg_lc_info subpdu;
   assert_ue_lch_valid(ue_lchs);
   // SRB1 SDU requires 2 bytes of subheader. However, if only 3 bytes were allocated, RLC overhead could not be fitted.
-  unsigned allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 50, LCID_SRB1);
+  unsigned allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 50, slot_point{}, LCID_SRB1);
   // Note: The MAC can only estimate the RLC overhead. However, it should always be equal or higher than 2 bytes, which
   // is the RLC UM header min size.
   const unsigned min_rlc_ovh = 2;
@@ -646,11 +646,11 @@ TEST_F(single_ue_dl_logical_channel_system_test, when_sdu_is_scheduled_pending_s
   ue_lchs.handle_dl_buffer_status_indication(LCID_MIN_DRB, drb1_bytes);
 
   dl_msg_lc_info subpdu;
-  unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 5000, LCID_SRB1);
+  unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 5000, slot_point{}, LCID_SRB1);
   ASSERT_EQ(allocated_bytes, get_mac_sdu_required_bytes(srb1_bytes));
   ASSERT_EQ(ue_lchs.dl_pending_bytes(ran_slice_id_t{0}), 0);
 
-  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 1000, LCID_MIN_DRB);
+  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, 1000, slot_point{}, LCID_MIN_DRB);
   ASSERT_EQ(allocated_bytes, 1000);
   ASSERT_EQ(ue_lchs.dl_pending_bytes(ran_slice_id_t{1}),
             get_mac_sdu_required_bytes(drb1_bytes + RLC_SEGMENTATION_OVERHEAD - subpdu.sched_bytes));
@@ -665,7 +665,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, qos_gbr_bearer_bitrate_is_track
   ue_lchs.handle_dl_buffer_status_indication(drb_lcid, sdu_size);
   unsigned       tb_size = sdu_size + 10;
   dl_msg_lc_info subpdu;
-  unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, drb_lcid);
+  unsigned       allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, slot_point{}, drb_lcid);
   ASSERT_GT(allocated_bytes, 0);
   ASSERT_TRUE(subpdu.lcid.is_valid());
   ASSERT_EQ(subpdu.lcid, drb_lcid);
@@ -688,7 +688,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, qos_gbr_bearer_bitrate_is_track
   // QoS GBR bearer should now track bitrate.
   ue_lchs.handle_dl_buffer_status_indication(drb_lcid, sdu_size);
   subpdu          = {};
-  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, drb_lcid);
+  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, slot_point{}, drb_lcid);
   ASSERT_GT(allocated_bytes, 0);
   ASSERT_EQ(subpdu.lcid, drb_lcid);
   ASSERT_EQ(get_mac_sdu_required_bytes(subpdu.sched_bytes), allocated_bytes);
@@ -699,7 +699,7 @@ TEST_F(single_ue_dl_logical_channel_system_test, qos_gbr_bearer_bitrate_is_track
   ue_lchs.configure(this->create_lcid_config(lcids));
   ue_lchs.handle_dl_buffer_status_indication(drb_lcid, sdu_size);
   subpdu          = {};
-  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, drb_lcid);
+  allocated_bytes = ue_lchs.allocate_mac_sdu(subpdu, tb_size, slot_point{}, drb_lcid);
   ASSERT_GT(allocated_bytes, 0);
   lch_system.slot_indication();
   ASSERT_EQ(ue_lchs.average_dl_bit_rate(drb_lcid), 0);
@@ -707,6 +707,69 @@ TEST_F(single_ue_dl_logical_channel_system_test, qos_gbr_bearer_bitrate_is_track
   ASSERT_EQ(lch_system.nof_ues(), 1);
   ASSERT_EQ(ue_lchs.get_prioritized_logical_channels().size(), 3);
   ASSERT_EQ(lch_system.nof_logical_channels(), 3) << "Reconfigurations created extra logical channels";
+}
+
+TEST_F(single_ue_dl_logical_channel_system_test, dl_pending_bytes_mfbr_capped_is_a_no_op_when_no_mfbr_is_configured)
+{
+  const lcid_t   drb_lcid = LCID_MIN_DRB;
+  const unsigned buf_st   = 10000;
+  ue_lchs.handle_dl_buffer_status_indication(drb_lcid, buf_st);
+
+  const slot_point sl_tx{to_numerology_value(subcarrier_spacing::kHz30), 0};
+  ASSERT_EQ(ue_lchs.dl_pending_bytes_mfbr_capped(sl_tx), ue_lchs.dl_pending_bytes());
+}
+
+TEST_F(single_ue_dl_logical_channel_system_test, dl_pending_bytes_mfbr_capped_clamps_large_backlog_to_the_mfbr_budget)
+{
+  const lcid_t drb_lcid = LCID_MIN_DRB;
+
+  // Configure a GBR DRB with a low DL MFBR (800 kbps).
+  std::vector<logical_channel_config> configs;
+  for (lcid_t lcid : lcids) {
+    configs.push_back(config_helpers::create_default_logical_channel_config(lcid));
+    if (not is_srb(lcid)) {
+      configs.back().qos.emplace();
+      configs.back().qos->qos.average_window_ms         = 100;
+      configs.back().qos->gbr_qos_info.emplace();
+      configs.back().qos->gbr_qos_info->max_br_dl = 800000; // 800 kbps, in bps.
+    }
+  }
+  ue_lchs.configure(cfg_pool.create(configs));
+
+  // Report a large backlog, well beyond what a low-kbps cap's burst allowance can carry in one slot.
+  const unsigned buf_st = 10000;
+  ue_lchs.handle_dl_buffer_status_indication(drb_lcid, buf_st);
+
+  const slot_point sl_tx{to_numerology_value(subcarrier_spacing::kHz30), 0};
+  const unsigned    uncapped_bytes = ue_lchs.dl_pending_bytes();
+  const unsigned    capped_bytes   = ue_lchs.dl_pending_bytes_mfbr_capped(sl_tx);
+  ASSERT_LT(capped_bytes, uncapped_bytes) << "MFBR cap should bind for a backlog this large";
+  ASSERT_GT(capped_bytes, 0);
+}
+
+TEST_F(single_ue_dl_logical_channel_system_test, dl_pending_bytes_mfbr_capped_does_not_clamp_a_small_backlog)
+{
+  const lcid_t drb_lcid = LCID_MIN_DRB;
+
+  // Configure a GBR DRB with a generous DL MFBR (50 Mbps).
+  std::vector<logical_channel_config> configs;
+  for (lcid_t lcid : lcids) {
+    configs.push_back(config_helpers::create_default_logical_channel_config(lcid));
+    if (not is_srb(lcid)) {
+      configs.back().qos.emplace();
+      configs.back().qos->qos.average_window_ms         = 100;
+      configs.back().qos->gbr_qos_info.emplace();
+      configs.back().qos->gbr_qos_info->max_br_dl = 50000000; // 50 Mbps, in bps.
+    }
+  }
+  ue_lchs.configure(cfg_pool.create(configs));
+
+  // Report a small backlog, comfortably within the burst allowance of a generous cap.
+  const unsigned buf_st = 100;
+  ue_lchs.handle_dl_buffer_status_indication(drb_lcid, buf_st);
+
+  const slot_point sl_tx{to_numerology_value(subcarrier_spacing::kHz30), 0};
+  ASSERT_EQ(ue_lchs.dl_pending_bytes_mfbr_capped(sl_tx), ue_lchs.dl_pending_bytes());
 }
 
 class multi_ue_dl_logical_channel_system_test : public logical_channel_system_test, public ::testing::Test

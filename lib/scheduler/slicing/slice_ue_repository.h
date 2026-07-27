@@ -77,6 +77,15 @@ public:
     return contains(lcid) ? u.logical_channels().pending_bytes(lcid) : 0;
   }
 
+  /// \brief UE-wide (not slice-scoped) DL pending bytes, with each LCID's contribution clamped by that LCID's
+  /// remaining MFBR budget for \c sl_tx, if configured. Intended to be used as an additional, conservative ceiling
+  /// alongside \ref pending_dl_newtx_bytes() at grant-sizing time - the same role the existing UE-aggregate
+  /// bitrate cap already plays there - not as a replacement for it.
+  unsigned pending_dl_newtx_bytes_mfbr_capped(slot_point sl_tx) const
+  {
+    return u.logical_channels().dl_pending_bytes_mfbr_capped(sl_tx);
+  }
+
   /// \brief Computes the number of UL pending bytes in bearers belonging to this slice that are not already allocated
   /// in a UL HARQ.
   unsigned pending_ul_newtx_bytes() const;
@@ -89,6 +98,9 @@ public:
   {
     return u.logical_channels().ul_pending_bytes_mfbr_capped(sl_tx);
   }
+
+  /// \brief Whether any active UL LCG for this UE has a configured MFBR cap.
+  bool has_ul_mfbr_cap() const { return u.logical_channels().has_ul_mfbr_cap(); }
 
   /// \brief Computes the number of UL bytes that are yet to be received by the scheduler. This includes the UL bytes
   /// of grants not yet scheduled and the UL bytes of already scheduled grants whose CRC has not reached the scheduled.
