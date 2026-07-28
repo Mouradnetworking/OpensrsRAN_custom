@@ -186,7 +186,7 @@ def main():
         plt.Line2D([0], [0], color=COLOR_PRB, linewidth=1.8,
                     label=f"PRB quota (Style 2/Action 6, max_prb_ratio={prb_ratio}%)"),
         plt.Line2D([0], [0], color=COLOR_CAP_LINE, linewidth=1.6, linestyle=(0, (4, 3)),
-                    label="Configured MFBR target (PRB quota has no rate target to show)"),
+                    label="Configured MFBR target"),
         Patch(facecolor=COLOR_PHASE_SHADE, alpha=0.10, label="Cap/quota active"),
     ]
     ax.legend(handles=legend_handles, loc="upper left", frameon=False, fontsize=8,
