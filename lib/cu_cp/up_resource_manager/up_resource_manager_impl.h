@@ -23,6 +23,7 @@
 #pragma once
 
 #include "srsran/cu_cp/up_context.h"
+#include "srsran/ran/cause/ngap_cause.h"
 #include <map>
 
 namespace srsran {
@@ -75,7 +76,10 @@ public:
   up_resource_manager(const up_resource_manager_cfg& cfg);
   ~up_resource_manager() = default;
 
-  bool validate_request(const slotted_id_vector<pdu_session_id_t, cu_cp_pdu_session_res_setup_item>& setup_items) const;
+  /// \param failure_cause If non-null and the request is invalid, filled with the specific NGAP cause (TS 38.413)
+  /// for the rejection, so the caller can report a precise cause to the AMF instead of a generic fallback.
+  bool validate_request(const slotted_id_vector<pdu_session_id_t, cu_cp_pdu_session_res_setup_item>& setup_items,
+                        ngap_cause_t* failure_cause = nullptr) const;
   bool validate_request(const cu_cp_pdu_session_resource_modify_request& pdu) const;
   bool validate_request(const cu_cp_pdu_session_resource_release_command& pdu) const;
 

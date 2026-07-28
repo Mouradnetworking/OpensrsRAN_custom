@@ -109,11 +109,16 @@ bool srsran::srs_cu_cp::is_valid(
     const slotted_id_vector<pdu_session_id_t, cu_cp_pdu_session_res_setup_item>& setup_items,
     const up_context&                                                            context,
     const up_resource_manager_cfg&                                               cfg,
-    const srslog::basic_logger&                                                  logger)
+    const srslog::basic_logger&                                                  logger,
+    ngap_cause_t*                                                                failure_cause)
 {
-  // Reject empty setup requests.
+  // Reject empty setup requests. Per TS 38.413, PDUSessionResourceSetupListSUReq has a mandatory minimum size of 1,
+  // so a request with an empty list is itself malformed - the generic protocol-error cause is the correct one here.
   if (setup_items.empty()) {
     logger.warning("Received empty setup list");
+    if (failure_cause != nullptr) {
+      *failure_cause = cause_protocol_t::abstract_syntax_error_falsely_constructed_msg;
+    }
     return false;
   }
 
@@ -121,6 +126,9 @@ bool srsran::srs_cu_cp::is_valid(
   for (const auto& pdu_session : setup_items) {
     if (context.pdu_sessions.find(pdu_session.pdu_session_id) != context.pdu_sessions.end()) {
       logger.info("PDU session ID {} already exists", pdu_session.pdu_session_id);
+      if (failure_cause != nullptr) {
+        *failure_cause = ngap_cause_radio_network_t::multiple_pdu_session_id_instances;
+      }
       return false;
     }
 
@@ -128,6 +136,9 @@ bool srsran::srs_cu_cp::is_valid(
     for (const auto& qos_flow : pdu_session.qos_flow_setup_request_items) {
       if (get_five_qi(qos_flow, cfg, logger) == five_qi_t::invalid) {
         logger.warning("Configuration for {} can't be derived", qos_flow.qos_flow_id);
+        if (failure_cause != nullptr) {
+          *failure_cause = ngap_cause_radio_network_t::not_supported_5qi_value;
+        }
         return false;
       }
     }
