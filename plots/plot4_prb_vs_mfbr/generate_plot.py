@@ -153,7 +153,9 @@ def main():
     ax.set_xlim(-10, win_end)
 
     ax.axvspan(0, mfbr_duration, color=COLOR_PHASE_SHADE, alpha=0.10, lw=0)
-    ax.hlines(mfbr_cap, 0, mfbr_duration, colors=COLOR_CAP_LINE, linestyles=(0, (4, 3)),
+    # Full-width reference line (not just the cap-active span) so it's easy to compare against
+    # both throughput lines throughout, not only inside the shaded region.
+    ax.hlines(mfbr_cap, -10, win_end, colors=COLOR_CAP_LINE, linestyles=(0, (4, 3)),
                linewidth=1.6, zorder=3)
     ax.text(mfbr_duration / 2, mfbr_cap + 0.35, f"MFBR target = {mfbr_cap:.0f} Mbps",
              ha="center", va="bottom", fontsize=8.5, color=COLOR_TEXT_SECONDARY)

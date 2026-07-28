@@ -158,7 +158,9 @@ def render_figure(delivered, offered, phases, window_start, window_end, out_stem
         a, b = t_a - window_start, t_b - window_start
         if cap is not None:
             ax.axvspan(a, b, color=COLOR_PHASE_SHADE, alpha=0.10, lw=0)
-            ax.hlines(cap, a, b, colors=COLOR_CAP_LINE, linestyles=(0, (4, 3)), linewidth=1.6, zorder=3)
+            # Full-width reference line (not just the cap-active span) so it's easy to compare
+            # against the offered/delivered lines throughout, not only inside the shaded region.
+            ax.hlines(cap, 0, window_end - window_start, colors=COLOR_CAP_LINE, linestyles=(0, (4, 3)), linewidth=1.6, zorder=3)
             ax.text(
                 (a + b) / 2, cap + 0.45, f"cap = {cap:.0f} Mbps",
                 ha="center", va="bottom", fontsize=8.5, color=COLOR_TEXT_SECONDARY,

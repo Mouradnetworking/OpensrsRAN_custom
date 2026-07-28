@@ -1,15 +1,14 @@
 # MFBR Enforcement — Investigation, Root Cause, and Fix
 
-**Date:** 2026-07-09 / 2026-07-10
-**Status: UL RESOLVED, DL NOT SAFE FOR USE.** UL MFBR enforcement (O-RAN E2SM-RC DRB QoS Configuration,
-Style 1/Action 1) is confirmed working end to end, live-tested under sustained soak, and covered by new
-regression tests. **DL MFBR enforcement's core clamp logic is confirmed correct at a single cap value, but
-reconfiguring an active DRB's DL cap a second time (e.g. changing the cap value, or removing it) reliably
-crashes the connection (RLF, forced UE Context Release) — root cause not yet found.** Until that is resolved,
-**do not use the DL side of this feature** (`max_dl_kbps` in `control_drb_qos()`) outside of a single, one-shot,
-non-repeated control action per UE session. This document supersedes the earlier "RESOLVED" status recorded for
-both directions on 2026-07-10, which turned out to be premature for DL — see §2.3 for the correction and what's
-known so far.
+**Date:** 2026-07-09 / 2026-07-10, DL crash resolved 2026-07-28 (see §8)
+**Status: UL and DL both resolved.** UL MFBR enforcement (O-RAN E2SM-RC DRB QoS Configuration, Style 1/Action 1)
+is confirmed working end to end, live-tested under sustained soak, and covered by new regression tests. **DL
+MFBR enforcement's long-standing "second reconfiguration crash"** (originally found 2026-07-10, root cause
+unknown at the time — see §2.3) **has since been root-caused and fixed** — two independent bugs, both in
+`srsRAN_4G`'s UE-side code, unrelated to the DL clamp logic itself. See §8 for the full writeup and live
+validation of a complete apply→observe→remove cycle. This document previously advised treating DL as
+one-shot-only; that restriction is lifted as of §8's fix, pending the same breadth of soak/regression testing UL
+has already received.
 
 ---
 
@@ -17,7 +16,7 @@ known so far.
 
 | Capability | Status |
 |---|---|
-| DL MFBR enforcement (Style 1/Action 1) | **NOT SAFE FOR USE.** Core clamp logic is correct (verified: 0.482 Mbps delivered against a 500 kbps cap, tight convergence, zero failures over 60s). But a *second* DL reconfiguration on the same DRB (different cap value, or removing the cap) reliably crashes the connection within 5–15 seconds — reproduced twice, once after a period of prior traffic and once on a freshly-restarted UE with no warm-up. Root cause not found; see §2.3. |
+| DL MFBR enforcement (Style 1/Action 1) | **Resolved (2026-07-28).** Core clamp logic was always correct (verified: 0.482 Mbps delivered against a 500 kbps cap, tight convergence, zero failures over 60s). The separate "second reconfiguration crashes" issue (§2.3) is now root-caused and fixed — two UE-side bugs in `srsRAN_4G`, see §8. Live-validated: a full apply (2 Mbps) → observe → remove cycle on the same DRB/session completes with zero RLF and zero buffer-pool exhaustion. |
 | UL MFBR enforcement (Style 1/Action 1) | **Fixed and confirmed.** Delivered throughput converges to the configured cap at multiple values, including a low binding cap (300 kbps → 237–260 kbps), a non-binding cap (8000 kbps → ~4.18 Mbps matching offered load), and a 3-minute sustained soak (3000 kbps → 2.79 Mbps, flat, zero RLF). Repeated/sequential reconfiguration of the same DRB (apply cap → observe → remove cap) has also been exercised without incident. |
 | PRB/physical-capacity ceiling (uncapped, above-real-capacity case) | Working, unaffected by these fixes. |
 | PRB quota (Style 2/Action 6) | Working, regression-confirmed after both fixes — no change in behavior. |
@@ -330,3 +329,86 @@ still-uncommitted 5-phase per-DRB GBR/MFBR effort — see `agentic_ran/GBR_MFBR_
    causing the second (redundant) computation to silently clamp the grant down to near-zero regardless of GBR
    configuration. Not yet fixed; needs a decision on whether to unify on one pending-bytes source before this
    feature is considered safe to enable broadly.
+
+---
+
+## 8. Update (2026-07-28): DL "second reconfiguration crash" (§2.3) root-caused and fixed
+
+A live one-shot DL MFBR test (2 Mbps cap, 40 Mbps offered, 20x oversubscribed) reproduced the exact §2.3 crash
+signature — `Couldn't allocate PDU in decode_pdsch_dl()` (UE's shared 4096-object `byte_buffer_t` pool
+exhausted), followed by simultaneous bidirectional PHY failure (UE-side `Error decoding PDSCH`, gNB-side PUSCH
+`crc=KO` bursts across all 8 HARQ processes at once) and RLF. Unlike §2.3's original finding, this occurred on
+the *first* reconfiguration under sustained backpressure, not only on a second one — tracing it uncovered two
+separate, previously-undiagnosed bugs, both in `srsRAN_4G` UE-side code, neither related to the DL clamp logic
+(confirmed correct throughout: PDSCH grant sizes stayed small and bounded right up to the crash).
+
+### 8.1 Bug 1 — PDCP `t-Reordering` timer never armed for `t_reordering=ms0`
+
+`pdcp_entity_nr.cc`'s `configure()`:
+```cpp
+if (cfg.t_reordering != pdcp_t_reordering_t::infinity) {
+  reordering_timer = task_sched.get_unique_timer();
+  if (static_cast<uint32_t>(cfg.t_reordering) > 0) {      // bug: treats ms0 as "disabled"
+    reordering_timer.set(static_cast<uint32_t>(cfg.t_reordering), *reordering_fnc);
+  }
+}
+```
+Per TS 38.331's `T-Reordering` IE, `ms0` (0ms) is a valid, distinct value from `infinity` — it means "resolve
+reordering gaps essentially immediately", not "no timer". The `> 0` guard skipped `.set()` entirely for `ms0`
+(our config's `t_reordering: 0`), leaving the timer's internal state at its all-zero default forever. When a
+reordering gap was later detected and `.run()` called, `start_run_()` computed `new_timeout = cur_time.load() + 0
+= cur_time.load()` — already one tick behind what the wheel would next check, so the timer could never expire.
+`PDCP-NR`'s `reorder_queue` (one `byte_buffer_t` per received PDU, keyed by COUNT, only freed on delivery) then
+grew unboundedly, exhausting the shared pool.
+
+**Fix**: removed the redundant `> 0` guard; `.set()` is now always called whenever `t_reordering != infinity`,
+matching the existing (correct) outer condition. `timers.h`'s own `set_()` clamps to a 1-tick minimum, so `ms0`
+now correctly yields a near-immediate (not disabled) timer.
+
+### 8.2 Bug 2 — timer-wheel off-by-one for duration-1 timers that re-arm themselves from their own expiry callback
+
+Fixing 8.1 exposed a second, deeper bug in the *shared* timer-wheel utility (`timers.h`), affecting any timer in
+`srsRAN_4G` — not specific to PDCP or DL. `step_all()` only incremented the atomic `cur_time` *after* running
+this tick's expiry callbacks:
+```cpp
+uint32_t cur_time_local = cur_time.load() + 1;
+// ... run this slot's callbacks (cur_time still holds the OLD value here) ...
+cur_time.fetch_add(1);   // committed only at the end
+```
+PDCP's reordering-timer callback legitimately restarts itself (per TS 38.323 §5.2.2.2, if a gap remains after
+delivering what it can) by calling `.run()`, which computes `new_timeout = cur_time.load() + duration`. For
+`duration == 1` specifically, and only when restarted *from within the same tick's callback*, this equals
+`cur_time_local` — the slot currently being processed, which the wheel never revisits (each tick's slot is
+checked exactly once). The timer silently re-arms into a slot that can never be reached again, appearing
+"running" forever. Timers with any duration ≥ 2 (e.g. `t-PollRetransmit`'s 45, investigated in §7) always land
+safely in the future and never hit this — which is why §7's investigation didn't surface it.
+
+**Fix**: moved `cur_time.fetch_add(1)` to immediately after computing `cur_time_local`, before the callback loop
+runs, so `cur_time` consistently means "the tick currently being stepped" for the entire duration of `step_all()`
+— including for any timer a callback restarts. Side-effect analysis: for every other timer in the system
+(durations of tens to hundreds of ms), a callback-triggered restart now targets one tick (1ms) later than
+before — well inside normal scheduling jitter and far below any 3GPP timer-accuracy requirement (TS 38.322/323/
+331 specify no timer at ms-exact tolerance); this is a pure internal bookkeeping correction with no over-the-air
+visibility. Verified: `rlc_am_nr_test`, `rlc_am_nr_pdu_test`, `rlc_am_data_test`, `rlc_am_control_test`,
+`rlc_common_test`, `pdcp_nr_test_tx`, `pdcp_nr_test_rx` (specifically exercises reordering), and
+`pdcp_nr_test_discard_sdu` all pass after the change.
+
+### 8.3 Live validation
+
+With both fixes deployed, on the same UE session (no restart between actions):
+- One-shot 2 Mbps DL cap, 45s hold, 40 Mbps offered (20x oversubscribed): zero allocation failures, zero RLF,
+  pool stayed at 22-36/4096 throughout (previously exhausted to ~3840+/4096 within ~24s).
+- **Full apply (2 Mbps) → observe → remove (uncapped) cycle — the exact §2.3 scenario** — on the same DRB/UE
+  session: zero new allocation failures, zero RLF, both gNB and UE remained alive throughout.
+
+### 8.4 What this does and doesn't establish
+
+This resolves the specific crash mechanism reproduced and traced above. It has *not* yet received the same
+breadth of testing UL has (§4): no multi-value DL staircase, no extended soak, no multi-cap-value regression
+sweep. Recommended before fully lifting the "DL not safe" guidance in production-adjacent contexts: repeat §4's
+regression pattern for DL (PRB quota, UE aggregate cap, scheduler unit tests — none of which touch this code
+path, so low risk, but not yet explicitly re-confirmed post-fix) and a DL equivalent of UL's 3-minute soak.
+
+**Diagnostic cleanup**: all temporary instrumentation added while chasing this (`fixed_size_pool.h`'s
+allocation counter, `demux_nr.cc`'s queue-depth probe, `pdcp_entity_nr.cc`'s reordering-state probe, `timers.h`'s
+wheel-visit/start-run logging) has been removed; only the two real fixes (§8.1, §8.2) remain.

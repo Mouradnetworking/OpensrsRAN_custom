@@ -58,12 +58,15 @@ bool pdcp_entity_nr::configure(const pdcp_config_t& cnfg_)
 
   rlc_mode = rlc->rb_is_um(lcid) ? rlc_mode_t::UM : rlc_mode_t::AM;
 
-  // t-Reordering timer
+  // t-Reordering timer. Per TS 38.331's T-Reordering IE, ms0 (0ms) is a valid, distinct value from
+  // "infinity" - it configures a timer that resolves reordering gaps essentially immediately, not a
+  // disabled timer. Guarding this on "> 0" (as opposed to the infinity check above) would leave the
+  // timer never configured (state.duration stuck at its all-zero default) for a ms0 configuration,
+  // meaning start_run_() later computes new_timeout = cur_time + 0 = cur_time - already one tick
+  // behind the next tick step_all() checks - so it could never expire.
   if (cfg.t_reordering != pdcp_t_reordering_t::infinity) {
     reordering_timer = task_sched.get_unique_timer();
-    if (static_cast<uint32_t>(cfg.t_reordering) > 0) {
-      reordering_timer.set(static_cast<uint32_t>(cfg.t_reordering), *reordering_fnc);
-    }
+    reordering_timer.set(static_cast<uint32_t>(cfg.t_reordering), *reordering_fnc);
   } else if (rlc_mode == rlc_mode_t::UM) {
     logger.warning("%s possible PDCP-NR misconfiguration: using infinite re-ordering timer with RLC UM bearer.",
                    rb_name);

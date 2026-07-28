@@ -379,6 +379,15 @@ static bool update_modify_list_with_bearer_ctxt_mod_response(
       drb_modify_item.qos_info.emplace();
       drb_modify_item.qos_info->drb_qos = next_drb_config.qos_params;
       drb_modify_item.qos_info->s_nssai = next_drb_config.s_nssai;
+      // FlowsMappedToDRB-List is also mandatory (min size 1) in DRBInformation - list every QoS flow
+      // currently mapped to this DRB, mirroring how the (working) DRB-setup path builds the same field
+      // (see fill_f1ap_drb_setup_mod_item() in pdu_session_routine_helpers.cpp).
+      for (const auto& [qfi, flow_ctx] : next_drb_config.qos_flows) {
+        flow_mapped_to_drb flow_map_item;
+        flow_map_item.qos_flow_id               = qfi;
+        flow_map_item.qos_flow_level_qos_params = flow_ctx.qos_params;
+        drb_modify_item.qos_info->flows_mapped_to_drb_list.push_back(flow_map_item);
+      }
 
       ue_context_mod_request.drbs_to_be_modified_list.push_back(drb_modify_item);
     }

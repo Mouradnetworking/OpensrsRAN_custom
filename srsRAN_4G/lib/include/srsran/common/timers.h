@@ -250,7 +250,15 @@ public:
   {
     std::unique_lock<std::mutex> lock(mutex);
     uint32_t                     cur_time_local = cur_time.load(std::memory_order_relaxed) + 1;
-    auto&                        wheel_list     = time_wheel[cur_time_local & WHEEL_MASK];
+    // Commit the tick advance *before* running this slot's callbacks, not after. A callback can call
+    // .run() on a timer (including itself, e.g. a reordering/retransmission timer re-arming for the
+    // next gap) - start_run_() computes new_timeout from cur_time.load(), so if that still held the
+    // pre-tick value while callbacks run, a timer restarted with duration=1 would compute
+    // new_timeout == cur_time_local, i.e. the slot currently being processed, which is never revisited
+    // (each tick's slot is only checked once) - silently stranding that timer as "running" forever.
+    // Bumping cur_time here first means "now" is consistently this tick for anything a callback does.
+    cur_time.fetch_add(1, std::memory_order_relaxed);
+    auto& wheel_list = time_wheel[cur_time_local & WHEEL_MASK];
 
     for (auto it = wheel_list.begin(); it != wheel_list.end();) {
       timer_impl& timer = timer_list[it->id];
@@ -271,8 +279,6 @@ public:
         }
       }
     }
-
-    cur_time.fetch_add(1, std::memory_order_relaxed);
   }
 
   void stop_all()
