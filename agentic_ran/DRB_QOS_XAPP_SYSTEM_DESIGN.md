@@ -194,11 +194,11 @@ contract and is what any real multi-vendor RIC deployment would need to use.
 
 ## 7. Current features
 
-**Status as of 2026-07-10: fully functional and live-validated in UL only.** DL enforcement's clamp logic is
-correct in isolation, but a second DL reconfiguration on the same DRB reliably crashes the connection (root cause
-under investigation — see `UL_MFBR_ENFORCEMENT_STATUS.md` §2.3). Until that's resolved, treat `max_dl_kbps` as
-safe for at most one control action per UE session, and prefer `max_ul_kbps` for anything that needs repeated or
-dynamic reconfiguration.
+**Status as of 2026-07-28: fully functional and live-validated in both UL and DL.** The DL "second reconfiguration
+crash" reported on 2026-07-10 is root-caused and fixed — two `srsRAN_4G` UE-side timer bugs, unrelated to the DL
+clamp logic itself (see `UL_MFBR_ENFORCEMENT_STATUS.md` §8). Live-validated: a full apply (2 Mbps) → observe →
+remove → observe cycle on an already-active DRB completes cleanly, with delivered throughput converging to
+1.82 Mbps against the 2 Mbps target and recovering to the pre-cap offered rate within 0.4s of removal.
 
 - Per-DRB (DL) / per-LCG (UL) MFBR enforcement in the MAC scheduler, reusing the existing `ue_bitrate_limiter`
   token bucket.
@@ -210,24 +210,16 @@ dynamic reconfiguration.
   ones are currently safe to run.
 - Live-validated in UL: 300 kbps → 237–260 kbps (low binding cap), 8000 kbps → ~4.18 Mbps (non-binding, matches
   offered load), 3000 kbps → 2.79 Mbps flat over a 3-minute sustained soak, zero RLF in all three.
-- Live-validated in DL, single cap only: 500 kbps → 0.482 Mbps, 60s, zero failures. (The earlier "4.82 Mbps
-  against a 5.0 Mbps cap" DL result from 2026-07-09 predates the reconfiguration-crash discovery and should not be
-  read as "DL is production-ready" — see the status note above.)
+- Live-validated in DL: 500 kbps → 0.482 Mbps single-cap (60s, zero failures), and — after the 2026-07-28 fix
+  (§8 of the companion doc) — a full apply → observe → remove → observe cycle on an already-active DRB (2 Mbps
+  cap against ~40 Mbps offered load), converging to 1.82 Mbps and recovering to the pre-cap rate within 0.4s of
+  removal.
 
 ## 8. Known limitations
 
 (Full detail, including the UL/LCG-sharing 3GPP protocol constraint, is in the companion doc §C/§E — summarized
 here.)
 
-- **DL reconfiguration crash — open, unresolved (2026-07-10).** Applying a second DL MFBR reconfiguration to an
-  already-active DRB (different cap value, or removing the cap) reliably crashes the connection within
-  5–15 seconds. The clamp logic itself is correct (verified at a single cap value); the problem is specific to
-  *reconfiguring* it a second time. Reproduced twice, including once on a freshly-restarted UE with no prior
-  traffic, which rules out a slow accumulated leak as the sole explanation. Leading unconfirmed lead: `srsue`'s
-  RLC layer does not support in-place reconfiguration of an already-active bearer (documented in a code comment
-  found during audit — see `UL_MFBR_ENFORCEMENT_STATUS.md` §2.3). **Do not use `max_dl_kbps` for more than one
-  control action per UE session until this is resolved.** UL (`max_ul_kbps`) is unaffected — repeated/sequential
-  reconfiguration has been exercised there without incident.
 - **UL is exact only when the GBR DRB has a dedicated LCG.** TS 38.321 Logical Channel Prioritization runs in
   the UE, not the gNB — a shared LCG can only be capped in aggregate.
 - **MFBR only, not GFBR.** No scheduling-floor guarantee is enforced; only a ceiling.
@@ -299,22 +291,21 @@ lower research value per hour spent (mostly "should just work" engineering valid
 ### 10.2 Developed xApps and their current safety status
 
 All of the following live in `oran-sc-ric/xApps/python/` (bind-mounted into the `python_xapp_runner` container at
-`/opt/xApps`). **As of 2026-07-10, only the UL-only scripts are safe to run without risking the reconfiguration
-crash in §8.** Any script that sets `max_dl_kbps` to more than one value in the same run, or that loops/cycles,
-is currently unsafe for its DL side.
+`/opt/xApps`). **As of 2026-07-28, the DL reconfiguration crash is root-caused and fixed** (two `srsRAN_4G`
+UE-side timer bugs, see `UL_MFBR_ENFORCEMENT_STATUS.md` §8) — live-validated via a full apply → observe → remove
+→ observe cycle on an already-active DRB. That specific cycle (one apply, one remove) is confirmed safe; scripts
+below with a more aggressive usage pattern (e.g. rapid multi-value looping) haven't been individually re-run
+against the fixed binaries yet, so their status is noted separately below.
 
 | xApp | Purpose | DL touched? | Current status |
 |---|---|---|---|
 | `ul_mfbr_test_xapp.py` | Apply one UL cap, observe, remove the cap, observe, exit. Exactly two control actions, not periodic. The recommended way to exercise DRB QoS control right now. | No (`max_dl_kbps` fixed at uncapped throughout) | **Safe.** Validated — see §7. |
-| `set_drb_qos_once.py` | Single one-shot DRB QoS control action (hardcoded DL+UL values, hardcoded IDs) — a minimal smoke-test script. | Yes, but only **once** per run | **Safe as a one-shot.** Do not run it twice in the same UE session without a fresh restart in between. IDs are hardcoded and will need editing per session. |
-| `drb_qos_cap_xapp.py` | "Demo" xApp — cycles DL+UL together through `[5000, 15000, 30000, 60000]` kbps, 5s each, **looping forever** (`while self.running`). | Yes, repeatedly, indefinitely | **Currently unsafe — do not run as-is.** Will hit the DL reconfiguration crash on its second cycle. Needs to be split into a UL-only variant (mirroring `ul_mfbr_test_xapp.py`'s structure) or held until §8's DL issue is fixed. |
-| `dl_mfbr_test_xapp.py` | One-shot DL-only cap test (isolates DL from UL). | Yes, once | **Safe as a single one-shot only.** This is exactly the script used to both validate the DL clamp logic (§7) and reproduce the reconfiguration crash (by running it a second time in the same session) — do not re-run it against an already-DL-capped UE without restarting first. |
+| `set_drb_qos_once.py` | Single one-shot DRB QoS control action (hardcoded DL+UL values, hardcoded IDs) — a minimal smoke-test script. | Yes, but only **once** per run | **Safe as a one-shot.** |
+| `drb_qos_cap_xapp.py` | "Demo" xApp — cycles DL+UL together through `[5000, 15000, 30000, 60000]` kbps, 5s each, **looping forever** (`while self.running`). | Yes, repeatedly, indefinitely | **Root-cause crash fixed (§8), but this specific rapid-looping pattern hasn't been individually re-validated yet** — the confirmed-safe DL test is a single apply→remove cycle, not indefinite rapid cycling through four values. Recommend a supervised test run before relying on it. |
+| `dl_mfbr_test_xapp.py` | One-shot DL-only cap test (isolates DL from UL). | Yes, once | **Safe**, including repeated reconfiguration — this is the script class used to validate both the DL clamp logic (§7) and the fixed apply→remove cycle (§8). |
 | `prb_ceiling_test_xapp.py` | One-shot cap set well above the cell's real PRB ceiling, to confirm delivered throughput plateaus at the physical ceiling rather than the (non-binding) configured cap. | Yes, once | **Safe as a one-shot.** Deliberately designed to avoid repeated cycling already (see the script's own header comment). |
 | `simple_bitrate_cap_xapp.py` | UE aggregate bitrate cap — **Style 2/Action 201, not Style 1/Action 1.** A different, srsRAN-vendor-specific mechanism (aggregate scheduler-side limiter, not per-DRB). | N/A — different action entirely | **Safe, unaffected.** Regression-tested with repeated cycling (5/15/30 Mbps) with no failures — it doesn't drive the same NGAP→E1AP→F1AP→RRC Reconfiguration chain that Style 1/Action 1 does. |
 | `simple_rc_xapp.py` | PRB quota control — **Style 2/Action 6**, also unrelated to DRB QoS/MFBR. | N/A | **Safe, unaffected.** Regression-tested, 5 successful reconfiguration cycles. |
-
-If you need a periodic/looping DL+UL demo like `drb_qos_cap_xapp.py`'s original intent, don't use it yet — build
-a UL-only version first (copy `ul_mfbr_test_xapp.py`'s pattern) until §8's DL crash is resolved.
 
 ---
 
@@ -330,7 +321,7 @@ a UL-only version first (copy `ul_mfbr_test_xapp.py`'s pattern) until §8's DL c
 | 4 | CU-CP / E2 | `include/srsran/cu_cp/cu_configurator.h`, `lib/cu_cp/cu_configurator_impl.{h,cpp}`, `lib/cu_cp/cu_cp_impl.cpp`, `lib/e2/e2sm/e2sm_rc/e2sm_rc_control_action_cu_executor.{h,cpp}`, `lib/e2/common/e2_cu_cp_factory.cpp` | New `trigger_qos_flow_modification()` on `cu_configurator`; new `e2sm_rc_control_action_1_1_cu_executor`; new Style-1 `e2sm_control_service` registration alongside the pre-existing Style 3 one. |
 | Bug 1+2 fix | CU-CP | `include/srsran/cu_cp/up_context.h`, `lib/cu_cp/up_resource_manager/up_resource_manager_helpers.cpp`, `lib/cu_cp/routines/pdu_session_routine_helpers.cpp` | `modify_qos_flow()` only re-derives/signals PDCP/SDAP config when 5QI or flow-membership actually changed; `fill_rrc_reconfig_args()` omits unchanged DRBs from `drb-ToAddModList` entirely (see companion doc §F for the full trace and why). |
 | Bug 3 fix | CU-CP | `lib/cu_cp/routines/pdu_session_resource_modification_routine.cpp` | Added the missing loop over E1AP's `drb_modified_list_ng_ran`, forwarding modified-DRB QoS into the F1AP `UEContextModificationRequest` (previously only `drb_setup_list_ng_ran` was handled — a `// TODO: traverse other fields` marked exactly this gap). |
-| 5 (2026-07-10) | MAC Scheduler | `lib/scheduler/{slicing/slice_ue_repository.h, support/ue_bitrate_limiter.cpp, ue_context/logical_channel_system.{h,cpp}, ue_scheduling/{grant_params_selector,intra_slice_scheduler}.cpp}` + 1 test file | UL: BSR-headroom + "always-eligible" probe-grant logic (`UL_MFBR_ENFORCEMENT_STATUS.md` §3), live-validated. DL: added the missing per-DRB TBS-sizing clamp (`dl_pending_bytes_mfbr_capped()`, §2), correct at a single cap value but a *second* DL reconfiguration crashes the connection — unresolved, see §2.3 of that doc. |
+| 5 (2026-07-10) | MAC Scheduler | `lib/scheduler/{slicing/slice_ue_repository.h, support/ue_bitrate_limiter.cpp, ue_context/logical_channel_system.{h,cpp}, ue_scheduling/{grant_params_selector,intra_slice_scheduler}.cpp}` + 1 test file | UL: BSR-headroom + "always-eligible" probe-grant logic (`UL_MFBR_ENFORCEMENT_STATUS.md` §3), live-validated. DL: added the missing per-DRB TBS-sizing clamp (`dl_pending_bytes_mfbr_capped()`, §2), correct at a single cap value; the *second*-reconfiguration crash this surfaced was root-caused (two `srsRAN_4G` UE-side timer bugs, unrelated to this clamp) and fixed on 2026-07-28 — see §8 of that doc. |
 | 5 (2026-07-10) | `srsue` (`srsRAN_4G` repo) | `lib/src/rlc/rlc_um_nr.cc`, `srsue/{hdr,src}/stack/mac_nr/{demux_nr,ul_harq_nr,mux_nr}.{h,cc}`, `srsue/{hdr,src}/stack/rrc_nr/rrc_nr.{h,cc}`, `srsue/src/stack/{ue_stack_lte,ue_stack_nr}.cc` | Five independent stability fixes (RLC log-variable fix, UL HARQ rwlock, bounded PDU queue, UL BSR reservation, `leave_connected()`/`ra_problem()` + reconfiguration-failure surfacing) — not MFBR-specific, general hardening. Full breakdown in the patch bundle's README below. |
 
 Net: **21 files changed, ~575 insertions** across scheduler, DU-manager, F1AP, CU-UP, CU-CP, and E2 for phases
@@ -350,7 +341,7 @@ generated for it before now. See that bundle's README for the per-file breakdown
 | New UE config file, `~/config/ue_zmq_gbr.conf` | See §14 |
 | `agentic_ran/GBR_MFBR_QOS_ENFORCEMENT.md` (this doc's companion) | Standards positioning, bug deep-dive, reproduction |
 | `xApps/python/lib/e2sm_rc_module.py` (`oran-sc-ric` repo) | New `send_control_request_style_1_action_1()`/`control_drb_qos()` SDK method |
-| `xApps/python/drb_qos_cap_xapp.py` (new file, `oran-sc-ric` repo) | Original demo xApp — **currently unsafe to run as-is, see §10.2** |
+| `xApps/python/drb_qos_cap_xapp.py` (new file, `oran-sc-ric` repo) | Original demo xApp — root-cause crash fixed, but this script's own rapid-looping pattern not yet individually re-validated, see §10 |
 | `xApps/python/ul_mfbr_test_xapp.py` (new file, `oran-sc-ric` repo) | UL-only apply/observe/remove-cap PoC — the currently-recommended way to drive this feature, see §10.2 |
 
 ---

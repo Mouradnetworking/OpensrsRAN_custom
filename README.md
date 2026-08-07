@@ -17,13 +17,10 @@ Community announcements and support - [Discussion board](https://www.github.com/
 Features and roadmap - [Features](https://docs.srsran.com/projects/project/en/latest/general/source/2_features_and_roadmap.html).
 
 > **This is a modified fork, and it bundles the whole agentic-RAN stack in one clone.** This repository is a
-> fork of the official [srsRAN Project](https://github.com/srsran/srsRAN_Project), maintained at
-> <https://github.com/Mouradnetworking/srsran>, extended (since July 2026) with per-slot/per-grant Layer 2
+> fork of the official [srsRAN Project](https://github.com/srsran/srsRAN_Project), extended with per-slot/per-grant Layer 2
 > telemetry, a UE-aggregate bitrate-cap RIC control action, and a standards-compliant per-DRB GBR
 > Maximum-Flow-Bit-Rate enforcement mechanism exposed via a new O-RAN E2SM-RC control action ("DRB QoS
-> Configuration", Style 1/Action 1), together with three upstream srsRAN bugs found and fixed along the way.
-> Full technical documentation, protocol-level traces, and a byte-for-byte reproducible patch bundle (for
-> applying just these changes on top of a clean upstream checkout) are under [`agentic_ran/`](./agentic_ran/).
+> Configuration", Style 1/Action 1).
 >
 > Unlike a typical fork, **this repo also contains the UE (`srsRAN_4G/`), the near-RT RIC platform + xApps
 > (`oran-sc-ric/`), and the testbed config used to run them together (`config/`)** — a single `git clone` gets
