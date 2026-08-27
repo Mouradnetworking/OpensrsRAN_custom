@@ -1,4 +1,4 @@
-# Local Claude Code session/config state - not part of the project
+# Local editor/tool session state - not part of the project
 .claude/
 
 # Build output (compiled binaries/objects - not source, regenerable via cmake --build)
