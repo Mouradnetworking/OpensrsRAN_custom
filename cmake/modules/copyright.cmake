@@ -41,7 +41,7 @@ function(parse_copyright_file FILE)
       string(REPLACE " " ";" _file_list "${_files_str}")
       get_module_name_from_files("${_file_list}" _module_name)
 
-      if("${_module_name}" STREQUAL "*" OR ${_module_name} STREQUAL "docs")
+      if("${_module_name}" STREQUAL "*" OR ${_module_name} STREQUAL "doxygen")
         continue()
       endif()
 

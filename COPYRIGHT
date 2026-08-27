@@ -6,8 +6,8 @@ License:   See LICENSE file
 The following files are used within srsRAN:
 
 
-Files:     docs/doxygen-awesome-sidebar-only.css
-           docs/doxygen-awesome.css
+Files:     build-tools/doxygen/doxygen-awesome-sidebar-only.css
+           build-tools/doxygen/doxygen-awesome.css
 Copyright: 2021-2024 jothepro
 License:   MIT
 

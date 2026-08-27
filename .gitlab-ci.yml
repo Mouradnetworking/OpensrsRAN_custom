@@ -357,7 +357,7 @@ include-guards:
       - INPUT_PATH: "include/srsran"
         INPUT_IGNORE: "/bundled/"
       - INPUT_PATH: "."
-        INPUT_IGNORE: "^\\(include\\|docs\\|external\\)/.*"
+        INPUT_IGNORE: "^\\(include\\|docs\\|build-tools\\|external\\)/.*"
 
 full-code-format:
   extends: .full-code-format
@@ -668,7 +668,7 @@ pages:
     - mkdir public
     - mv coverage_html public/
     - mv codechecker*html public/
-    - mv docs/index.html public/index.html
+    - mv build-tools/doxygen/index.html public/index.html
     - docker/scripts/install_dependencies.sh
     - apt-get update && apt-get install -y --no-install-recommends rsync
     - |
@@ -679,7 +679,7 @@ pages:
       make -j $(nproc) doxygen
       cd ..
     - mkdir public/doxygen
-    - rsync -a build/docs/html/ public/doxygen/
+    - rsync -a build/build-tools/doxygen/html/ public/doxygen/
     - |
       # Remove bigger file if size is bigger than 900MB
       while [ $(du -s public | awk '{print $1}') -gt 921600 ]; do
@@ -692,9 +692,9 @@ pages:
     - |
       if [ $CI_JOB_STATUS = "failed" ]; then
         mkdir -p public
-        mv docs/fail.html public/index.html
+        mv build-tools/doxygen/fail.html public/index.html
       fi
-    - mv docs/*.png public/
+    - mv build-tools/doxygen/*.png public/
     - sed -i 's/commit_hash/'$CI_COMMIT_SHA'/' public/index.html
   needs:
     - job: unit coverage dev
