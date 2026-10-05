@@ -80,6 +80,7 @@ private:
   e1ap_bearer_context_modification_response
        bearer_context_modification_response; // to inform CU-UP about the new TEID for UL F1u traffic
   bool rrc_reconfig_result = false;          // the final UE reconfiguration
+  bool rrc_reconfig_has_content = false;     // whether rrc_reconfig_args carries anything worth an RRC round-trip
 };
 
 } // namespace srs_cu_cp

@@ -3192,7 +3192,13 @@ static bool calculate_mac_cell_group_config_diff(asn1::rrc_nr::mac_cell_group_cf
     out.sched_request_cfg_present = true;
   }
 
-  if (dest.bsr_cfg.has_value()) {
+  // Unlike phr_cfg below, this previously checked only dest.bsr_cfg.has_value() - with no comparison against src -
+  // so it was marked present on every call as long as a bsr_cfg was configured at all, even when it was identical
+  // to what had already been signalled.
+  if (dest.bsr_cfg.has_value() &&
+      (not src.bsr_cfg.has_value() || dest.bsr_cfg.value().periodic_timer != src.bsr_cfg.value().periodic_timer ||
+       dest.bsr_cfg.value().retx_timer != src.bsr_cfg.value().retx_timer ||
+       dest.bsr_cfg.value().lc_sr_delay_timer != src.bsr_cfg.value().lc_sr_delay_timer)) {
     out.bsr_cfg_present = true;
     make_asn1_rrc_bsr_config(out.bsr_cfg, dest.bsr_cfg.value());
   }
@@ -3277,15 +3283,21 @@ void srsran::srs_du::calculate_cell_group_config_diff(asn1::rrc_nr::cell_group_c
   out.mac_cell_group_cfg_present =
       calculate_mac_cell_group_config_diff(out.mac_cell_group_cfg, src.cell_group.mcg_cfg, dest.cell_group.mcg_cfg);
 
-  out.phys_cell_group_cfg_present = true;
-  if (dest.cell_group.pcg_cfg.p_nr_fr1.has_value()) {
-    out.phys_cell_group_cfg.p_nr_fr1_present = true;
-    out.phys_cell_group_cfg.p_nr_fr1         = dest.cell_group.pcg_cfg.p_nr_fr1.value();
+  // Unlike the other sub-fields above, phys_cell_group_cfg was previously derived from dest alone, with no
+  // comparison against src - meaning it was always marked present, even when nothing in it had actually changed
+  // since the last cellGroupConfig sent to this UE. Only include it here if it genuinely differs.
+  out.phys_cell_group_cfg_present = src.cell_group.pcg_cfg.p_nr_fr1 != dest.cell_group.pcg_cfg.p_nr_fr1 or
+                                    src.cell_group.pcg_cfg.pdsch_harq_codebook != dest.cell_group.pcg_cfg.pdsch_harq_codebook;
+  if (out.phys_cell_group_cfg_present) {
+    if (dest.cell_group.pcg_cfg.p_nr_fr1.has_value()) {
+      out.phys_cell_group_cfg.p_nr_fr1_present = true;
+      out.phys_cell_group_cfg.p_nr_fr1         = dest.cell_group.pcg_cfg.p_nr_fr1.value();
+    }
+    out.phys_cell_group_cfg.pdsch_harq_ack_codebook.value =
+        dest.cell_group.pcg_cfg.pdsch_harq_codebook == pdsch_harq_ack_codebook::dynamic
+            ? phys_cell_group_cfg_s::pdsch_harq_ack_codebook_opts::dyn
+            : asn1::rrc_nr::phys_cell_group_cfg_s::pdsch_harq_ack_codebook_opts::semi_static;
   }
-  out.phys_cell_group_cfg.pdsch_harq_ack_codebook.value =
-      dest.cell_group.pcg_cfg.pdsch_harq_codebook == pdsch_harq_ack_codebook::dynamic
-          ? phys_cell_group_cfg_s::pdsch_harq_ack_codebook_opts::dyn
-          : asn1::rrc_nr::phys_cell_group_cfg_s::pdsch_harq_ack_codebook_opts::semi_static;
 }
 
 static ssb_mtc_s make_ssb_mtc(const du_cell_config& du_cell_cfg)

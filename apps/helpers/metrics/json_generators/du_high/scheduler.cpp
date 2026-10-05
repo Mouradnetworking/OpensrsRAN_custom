@@ -70,6 +70,9 @@ void to_json(nlohmann::json& json, const scheduler_ue_metrics& metrics)
   json["dl_nof_ok"]  = metrics.dl_nof_ok;
   json["dl_nof_nok"] = metrics.dl_nof_nok;
   json["dl_bs"]      = metrics.dl_bs;
+  if (metrics.dl_hol_delay_ms.has_value()) {
+    json["dl_hol_delay_ms"] = metrics.dl_hol_delay_ms;
+  }
   if (!std::isnan(metrics.pusch_snr_db) && !iszero(metrics.pusch_snr_db)) {
     json["pusch_snr_db"] = std::clamp(metrics.pusch_snr_db, -99.9f, 99.9f);
   }

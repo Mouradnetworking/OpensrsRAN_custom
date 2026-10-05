@@ -27,8 +27,11 @@
 #include "srsran/ngap/ngap_types.h"
 #include "srsran/ran/cu_types.h"
 #include "srsran/ran/nr_cgi.h"
+#include "srsran/ran/qos/five_qi.h"
 #include "srsran/ran/qos/qos_flow_id.h"
+#include "srsran/ran/rb_id.h"
 #include <map>
+#include <optional>
 
 namespace srsran {
 
@@ -42,6 +45,18 @@ struct cu_handover_control_config {
   std::map<pdu_session_id_t, std::vector<qos_flow_id_t>> pdu_sessions_for_ho;
   std::map<drb_id_t, std::vector<qos_flow_id_t>>         drbs_for_ho;
   std::vector<nr_cell_global_id_t>                       secondary_cells_to_be_added;
+};
+
+/// \brief RAN parameters for the E2SM-RC Style 1 ("Radio Bearer Control"), Action 1 ("DRB QoS Configuration")
+/// control action (O-RAN.WG3.E2SM-RC v03.00, Section 8.4.2.1, RAN Parameter IDs 1, 2, 13, 16). Only the DRB ID
+/// (key), 5QI and Maximum Flow Bit Rate DL/UL are supported; the remaining RAN parameters from that action's
+/// table (Packet Delay Budget, ARP, GFBR, packet loss rate, QoS monitoring, etc.) are left unimplemented,
+/// matching the existing Style 3/Action 1 executor's partial RAN parameter coverage.
+struct cu_qos_flow_control_config {
+  drb_id_t                 drb_id = drb_id_t::invalid;
+  std::optional<five_qi_t> five_qi;
+  std::optional<uint64_t>  max_flow_bit_rate_dl; // RAN Parameter ID 13, in bps.
+  std::optional<uint64_t>  max_flow_bit_rate_ul; // RAN Parameter ID 16, in bps.
 };
 
 class cu_configurator
@@ -67,6 +82,12 @@ public:
   virtual async_task<srs_cu_cp::cu_cp_intra_cu_handover_response>
   trigger_handover(const srs_cu_cp::du_index_t&                      source_du_index,
                    const srs_cu_cp::cu_cp_intra_cu_handover_request& handover_req) = 0;
+
+  /// \brief Trigger a dynamic DRB QoS (re)configuration for an existing UE, applying it to every QoS flow
+  /// currently mapped to the target DRB. Returns true if the request was accepted for processing (fire-and-
+  /// forget, mirroring trigger_handover); it does not wait for the F1AP/E1AP/RRC round trip to complete.
+  virtual async_task<bool> trigger_qos_flow_modification(const srs_cu_cp::ue_index_t&      ue_index,
+                                                          const cu_qos_flow_control_config& cfg) = 0;
 };
 
 } // namespace srsran

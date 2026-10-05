@@ -71,4 +71,24 @@ public:
 private:
 };
 
+/// E2SM-RC CONTROL Service Style 1 (Radio Bearer Control), Action 1 (DRB QoS Configuration), see
+/// O-RAN.WG3.E2SM-RC v03.00 Section 7.6.2.1/8.4.2.1.
+class e2sm_rc_control_action_1_1_cu_executor : public e2sm_rc_control_action_cu_executor_base
+{
+public:
+  e2sm_rc_control_action_1_1_cu_executor(cu_configurator& cu_configurator_);
+  virtual ~e2sm_rc_control_action_1_1_cu_executor() = default;
+
+  /// e2sm_control_request_executor functions.
+  bool                                  ric_control_action_supported(const e2sm_ric_control_request& req) override;
+  async_task<e2sm_ric_control_response> execute_ric_control_action(const e2sm_ric_control_request& req) override;
+  void parse_action_ran_parameter_value(const asn1::e2sm::ran_param_value_type_c& ran_p,
+                                        uint64_t                                  ran_param_id,
+                                        uint64_t                                  ue_id,
+                                        cu_qos_flow_control_config&               ctrl_cfg);
+  using T = cu_qos_flow_control_config;
+
+private:
+};
+
 } // namespace srsran

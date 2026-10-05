@@ -271,6 +271,16 @@ static std::optional<dl_sched_context> get_dl_sched_context(const slice_ue&     
       // NewTx Case.
       nof_layers                           = ue_cc.channel_state_manager().get_nof_dl_layers();
       const pdsch_config_params& pdsch_cfg = ss.get_pdsch_config(pdsch_td_index, nof_layers);
+      // Throughput cap: clamp the newTx payload to the UE's configured DL bitrate budget for this slot. HARQ
+      // retransmissions (the "else" branch below) are never throttled, since they carry already-counted data and
+      // skipping them would only waste HARQ processes and hurt reliability.
+      pending_bytes      = std::min(pending_bytes, ue_cc.dl_bitrate_limiter().get_max_grantable_bytes(pdsch_slot));
+      // Per-DRB MFBR cap: additionally clamp by each DRB's own remaining MFBR budget, if configured (no-op
+      // otherwise). Without this, the TBS/PRB size decided here would be driven by the DRB's raw, uncapped
+      // backlog, which keeps growing whenever the offered rate exceeds the cap (only allocate_mac_sdu() enforces
+      // the cap on how much of an already-sized TBS gets filled) - see dl_logical_channel_context::mbr_limiter's
+      // doc comment.
+      pending_bytes = std::min(pending_bytes, u.pending_dl_newtx_bytes_mfbr_capped(pdsch_slot));
       auto mcs_prbs_sel = compute_newtx_required_mcs_and_prbs(pdsch_cfg, ue_cc, pending_bytes, nof_rb_lims);
       if (not mcs_prbs_sel.has_value()) {
         // Note: No point in carrying on.
@@ -432,12 +442,57 @@ static std::optional<ul_sched_context> get_ul_sched_context(const slice_ue&     
       // Note: We assume k2 <= k1, which means that all the HARQ bits are set at this point for this UL slot and UE.
       pusch_cfg =
           compute_newtx_pusch_config_params(ue_cc, dci_type, pusch_td_res, uci_nof_harq_bits, is_csi_report_slot);
+      // Throughput cap: clamp the newTx grant to the UE's configured UL bitrate budget for this slot. HARQ
+      // retransmissions (the "else" branch below) are never throttled.
+      pending_bytes = std::min(pending_bytes, ue_cc.ul_bitrate_limiter().get_max_grantable_bytes(pusch_slot));
+      // Per-DRB MFBR cap: additionally clamp by each LCG's own remaining MFBR budget, if configured (no-op
+      // otherwise). This only isolates a single GBR DRB's UL rate when that DRB has an LCG to itself - see
+      // ul_logical_channel_group_context::mbr_limiter's doc comment for why (UL LCP is UE-controlled, TS 38.321).
+      const bool     ul_mfbr_capped     = u.has_ul_mfbr_cap();
+      const unsigned ul_mfbr_budget_now = u.pending_ul_newtx_bytes_mfbr_capped(pusch_slot);
+      pending_bytes                     = std::min(pending_bytes, ul_mfbr_budget_now);
+
+      // PUSCH allocation is fundamentally quantized (TS 38.214 Sec 5.1.3.2): an integer number of PRBs maps to a
+      // discrete TBS from a fixed table - there is no way to grant an arbitrary fractional byte count. When an
+      // MFBR-capped LCG's token bucket has only accumulated a few bytes since the last grant (e.g. a low cap's
+      // per-slot refill is smaller than the smallest efficient PRB/MCS combination available this slot), granting
+      // immediately would systematically overshoot the configured rate every time it happens, because - unlike
+      // DL - the UE fills whatever PRBs it's given with real backlogged data (TS 38.321 UL LCP is UE-controlled,
+      // there is no second gNB-side "fill" clamp to fall back on). Defer instead and let the token bucket's own
+      // 20 ms burst window (see ue_bitrate_limiter's doc comment - it exists exactly to "avoid single-slot grant
+      // starvation/fragmentation") accumulate more credit before granting, rather than forcing an inefficient
+      // grant on every qualifying slot. The periodic BSR-refresh headroom below still fires on schedule regardless
+      // of this deferral, so the feedback loop that depends on it never stalls.
+      static constexpr unsigned UL_MFBR_MIN_EFFICIENT_GRANT_BYTES = 20;
+      static constexpr unsigned UL_MFBR_HEADROOM_PERIOD_MS        = 10;
+      const bool ul_mfbr_headroom_due =
+          (pusch_slot.to_uint() % (pusch_slot.nof_slots_per_subframe() * UL_MFBR_HEADROOM_PERIOD_MS)) == 0;
+      if (ul_mfbr_capped and ul_mfbr_budget_now < UL_MFBR_MIN_EFFICIENT_GRANT_BYTES and not ul_mfbr_headroom_due) {
+        return std::nullopt;
+      }
+
       auto mcs_prbs_sel = compute_newtx_required_mcs_and_prbs(pusch_cfg, ue_cc, pending_bytes, nof_rb_lims);
       if (not mcs_prbs_sel.has_value()) {
         return std::nullopt;
       }
       mcs     = mcs_prbs_sel->mcs;
       nof_rbs = mcs_prbs_sel->nof_prbs;
+      if (ul_mfbr_capped and ul_mfbr_headroom_due and nof_rbs < nof_rb_lims.stop()) {
+        // Guarantee several extra PRBs of headroom beyond the byte-exact size, so an MFBR-capped grant
+        // periodically has *comfortable* spare capacity for a padding BSR MAC CE - see
+        // ul_pending_bytes_mfbr_capped()'s doc comment for why this matters. A single extra PRB was found live to
+        // be an unreliable margin: the UE only opportunistically includes a Padding BSR when leftover space is
+        // clearly worth it (TS 38.321 Sec 5.4.5's "equal to or larger than the size of the Long BSR plus its
+        // subheader" condition, and it competes with any real data also wanting that space), so a marginal excess
+        // was sometimes silently absorbed by more real data instead of a BSR, leaving the staleness problem this
+        // headroom exists to solve unresolved on those occasions. A larger, unambiguous margin makes the UE's
+        // "worth it" decision reliable. Gated on "is this UE UL-MFBR-capped at all" rather than "did the MFBR
+        // clamp technically produce the smaller value this slot", since at very small backlog sizes the two can
+        // be nearly identical and comparing them is not a robust signal - the goal is guaranteeing headroom
+        // whenever the BSR-staleness risk exists, not pinpointing the exact binding constraint.
+        static constexpr unsigned UL_MFBR_HEADROOM_EXTRA_PRBS = 4;
+        nof_rbs = std::min(nof_rbs + UL_MFBR_HEADROOM_EXTRA_PRBS, nof_rb_lims.stop());
+      }
     } else {
       // ReTx Case.
       mcs     = h_ul->get_grant_params().mcs;

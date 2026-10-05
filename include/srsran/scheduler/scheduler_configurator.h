@@ -130,6 +130,11 @@ struct sched_ue_resource_alloc_config {
   unsigned max_pusch_harq_retxs = 4;
   // RRM policy for the UE.
   rrm_policy_ratio_group rrm_policy_group;
+  /// \brief Maximum sustained DL bitrate for the UE, in kbps. \c std::nullopt (default) means unrestricted.
+  /// \remark Enforced by \c ue_bitrate_limiter on new-data grants only; HARQ retransmissions are never throttled.
+  std::optional<unsigned> max_dl_bitrate_kbps;
+  /// \brief Maximum sustained UL bitrate for the UE, in kbps. \c std::nullopt (default) means unrestricted.
+  std::optional<unsigned> max_ul_bitrate_kbps;
 };
 
 /// Request for a new UE configuration provided to the scheduler during UE creation or reconfiguration.

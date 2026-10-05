@@ -22,6 +22,8 @@
 
 #include "cu_configurator_impl.h"
 #include "du_processor/du_processor_repository.h"
+#include "up_resource_manager/up_resource_manager_impl.h"
+#include <algorithm>
 
 using namespace srsran;
 using namespace srs_cu_cp;
@@ -100,4 +102,79 @@ cu_configurator_impl::trigger_handover(const du_index_t&                      so
 
   // Only confirm that the HO request was accepted, no info about the HO outcome.
   return return_handover_response(true);
+}
+
+async_task<bool> cu_configurator_impl::return_qos_flow_modification_response(bool ack)
+{
+  return launch_async([ack](coro_context<async_task<bool>>& ctx) {
+    CORO_BEGIN(ctx);
+    CORO_RETURN(ack);
+  });
+}
+
+async_task<bool> cu_configurator_impl::trigger_qos_flow_modification(const ue_index_t&                 ue_index,
+                                                                     const cu_qos_flow_control_config& cfg)
+{
+  cu_cp_ue* u = ue_mng.find_du_ue(ue_index);
+  if (u == nullptr) {
+    return return_qos_flow_modification_response(false);
+  }
+
+  up_resource_manager&  up_mng = u->get_up_resource_manager();
+  std::vector<drb_id_t> drbs   = up_mng.get_drbs();
+  if (std::find(drbs.begin(), drbs.end(), cfg.drb_id) == drbs.end()) {
+    return return_qos_flow_modification_response(false);
+  }
+
+  const up_drb_context& drb_ctxt = up_mng.get_drb_context(cfg.drb_id);
+  if (drb_ctxt.qos_flows.empty()) {
+    return return_qos_flow_modification_response(false);
+  }
+
+  cu_cp_pdu_session_resource_modify_request modify_req;
+  modify_req.ue_index = ue_index;
+
+  cu_cp_pdu_session_res_modify_item_mod_req mod_item;
+  mod_item.pdu_session_id = drb_ctxt.pdu_session_id;
+
+  // Apply the (partial) update to every QoS flow currently mapped to this DRB, keeping all other QoS
+  // parameters as they currently are.
+  for (const auto& flow : drb_ctxt.qos_flows) {
+    cu_cp_qos_flow_add_or_mod_item flow_item;
+    flow_item.qos_flow_id               = flow.first;
+    flow_item.qos_flow_level_qos_params = drb_ctxt.qos_params;
+
+    if (cfg.five_qi.has_value()) {
+      flow_item.qos_flow_level_qos_params.qos_desc = qos_characteristics(non_dyn_5qi_descriptor{cfg.five_qi.value()});
+    }
+
+    if (cfg.max_flow_bit_rate_dl.has_value() or cfg.max_flow_bit_rate_ul.has_value()) {
+      gbr_qos_flow_information gbr_info =
+          flow_item.qos_flow_level_qos_params.gbr_qos_info.value_or(gbr_qos_flow_information{});
+      if (cfg.max_flow_bit_rate_dl.has_value()) {
+        gbr_info.max_br_dl = cfg.max_flow_bit_rate_dl.value();
+      }
+      if (cfg.max_flow_bit_rate_ul.has_value()) {
+        gbr_info.max_br_ul = cfg.max_flow_bit_rate_ul.value();
+      }
+      flow_item.qos_flow_level_qos_params.gbr_qos_info = gbr_info;
+    }
+
+    mod_item.transfer.qos_flow_add_or_modify_request_list.insert(flow_item.qos_flow_id, flow_item);
+  }
+
+  modify_req.pdu_session_res_modify_items.insert(mod_item.pdu_session_id, mod_item);
+
+  auto qos_trigger = ([this, modify_req](coro_context<async_task<void>>& ctx) mutable {
+    CORO_BEGIN(ctx);
+    CORO_AWAIT(ngap_handler.handle_new_pdu_session_resource_modify_request(modify_req));
+    CORO_RETURN();
+  });
+
+  if (not u->get_task_sched().schedule_async_task(launch_async(std::move(qos_trigger)))) {
+    return return_qos_flow_modification_response(false);
+  }
+
+  // Only confirm that the request was accepted, no info about the modification outcome.
+  return return_qos_flow_modification_response(true);
 }

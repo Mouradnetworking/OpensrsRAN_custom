@@ -83,4 +83,34 @@ private:
                                                      const srs_du::du_mac_sched_control_config_response& du_reponse_);
 };
 
+/// \brief E2SM-RC control action to cap a UE's sustained DL/UL bitrate.
+///
+/// \remark This is a native srsRAN extension, registered under RC Style 2 ("Radio Access Control", the same style
+/// used by the standard Slice-level PRB quota action) with a vendor-specific action ID: the O-RAN E2SM-RC v3.00
+/// catalogue for Style 2 has no standard action for a direct bitrate cap (its closest action, "Slice-level PRB
+/// quota", caps the *resource share* percentage, not the achieved rate in kbps - see
+/// AGENTIC_RAN_SRSRAN_TELEMETRY_DESIGN.md for the distinction). Action ID 201 is used to make clear this falls
+/// outside the standard-assigned range.
+class e2sm_rc_control_action_2_201_du_executor : public e2sm_rc_control_action_du_executor_base
+{
+public:
+  e2sm_rc_control_action_2_201_du_executor(srs_du::du_configurator&       du_configurator_,
+                                           srs_du::f1ap_ue_id_translator& f1ap_ue_id_translator_);
+  virtual ~e2sm_rc_control_action_2_201_du_executor() = default;
+
+  /// e2sm_control_request_executor functions.
+  bool                                  ric_control_action_supported(const e2sm_ric_control_request& req) override;
+  async_task<e2sm_ric_control_response> execute_ric_control_action(const e2sm_ric_control_request& req) override;
+  void parse_action_ran_parameter_value(const asn1::e2sm::ran_param_value_type_c& ran_p,
+                                        uint64_t                                  ran_param_id,
+                                        uint64_t                                  ue_id,
+                                        srs_du::du_mac_sched_control_config&      ctrl_cfg);
+  using T = srs_du::du_mac_sched_control_config;
+
+private:
+  srs_du::du_mac_sched_control_config convert_to_du_config_request(const e2sm_ric_control_request& e2sm_req_);
+  e2sm_ric_control_response convert_to_e2sm_response(const srs_du::du_mac_sched_control_config&          du_config_req_,
+                                                     const srs_du::du_mac_sched_control_config_response& du_reponse_);
+};
+
 } // namespace srsran

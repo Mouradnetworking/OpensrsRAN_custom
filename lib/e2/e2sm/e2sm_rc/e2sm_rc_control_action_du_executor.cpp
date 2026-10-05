@@ -290,3 +290,125 @@ e2sm_ric_control_response e2sm_rc_control_action_2_6_du_executor::convert_to_e2s
 
   return e2sm_response;
 }
+
+e2sm_rc_control_action_2_201_du_executor::e2sm_rc_control_action_2_201_du_executor(
+    srs_du::du_configurator&       du_configurator_,
+    srs_du::f1ap_ue_id_translator& f1ap_ue_id_translator_) :
+  e2sm_rc_control_action_du_executor_base(du_configurator_, f1ap_ue_id_translator_, 201)
+{
+  // Control Action description:
+  // Vendor-specific (srsRAN) extension to cap a UE's sustained DL/UL bitrate. Not part of the O-RAN Style 2
+  // standard action catalogue - see the class header comment.
+  action_name = "UE Bitrate Cap";
+  action_params.insert({1, "Maximum DL Bitrate"});
+  action_params.insert({2, "Maximum UL Bitrate"});
+}
+
+void e2sm_rc_control_action_2_201_du_executor::parse_action_ran_parameter_value(
+    const ran_param_value_type_c&        ran_param,
+    uint64_t                             ran_param_id,
+    uint64_t                             ue_id,
+    srs_du::du_mac_sched_control_config& ctrl_cfg)
+{
+  if (ran_param_id == 1) {
+    // Maximum DL Bitrate, in kbps.
+    ctrl_cfg.max_dl_bitrate_kbps =
+        static_cast<unsigned>(ran_param.ran_p_choice_elem_false().ran_param_value.value_int());
+  } else if (ran_param_id == 2) {
+    // Maximum UL Bitrate, in kbps.
+    ctrl_cfg.max_ul_bitrate_kbps =
+        static_cast<unsigned>(ran_param.ran_p_choice_elem_false().ran_param_value.value_int());
+  } else {
+    logger.error("Unknown RAN parameter ID {}", ran_param_id);
+  }
+}
+
+bool e2sm_rc_control_action_2_201_du_executor::ric_control_action_supported(const e2sm_ric_control_request& req)
+{
+  const e2sm_rc_ctrl_msg_format1_s& ctrl_msg =
+      std::get<e2sm_rc_ctrl_msg_s>(req.request_ctrl_msg).ric_ctrl_msg_formats.ctrl_msg_format1();
+
+  for (auto& ran_p : ctrl_msg.ran_p_list) {
+    if (action_params.find(ran_p.ran_param_id) == action_params.end()) {
+      return false;
+    }
+  };
+  return true;
+}
+
+async_task<e2sm_ric_control_response>
+e2sm_rc_control_action_2_201_du_executor::execute_ric_control_action(const e2sm_ric_control_request& req)
+{
+  srs_du::du_mac_sched_control_config ctrl_config = convert_to_du_config_request(req);
+  // If neither cap was provided, there is nothing to configure.
+  if (not ctrl_config.max_dl_bitrate_kbps.has_value() and not ctrl_config.max_ul_bitrate_kbps.has_value()) {
+    return return_ctrl_failure(req);
+  }
+
+  logger.info("UE Bitrate Cap Control Request for UE gNB-DU-UE-F1AP-ID={}: max_dl_kbps={} max_ul_kbps={}",
+             gnb_du_ue_f1ap_id_to_uint(ctrl_config.ue_id),
+             ctrl_config.max_dl_bitrate_kbps.has_value() ? fmt::to_string(*ctrl_config.max_dl_bitrate_kbps) : "unset",
+             ctrl_config.max_ul_bitrate_kbps.has_value() ? fmt::to_string(*ctrl_config.max_ul_bitrate_kbps) : "unset");
+
+  return launch_async(
+      [this, ctrl_config = std::move(ctrl_config)](coro_context<async_task<e2sm_ric_control_response>>& ctx) {
+        CORO_BEGIN(ctx);
+        srs_du::du_mac_sched_control_config_response ctrl_response;
+        CORO_AWAIT_VALUE(ctrl_response, du_param_configurator.configure_ue_mac_scheduler(ctrl_config));
+        e2sm_ric_control_response e2_resp = convert_to_e2sm_response(ctrl_config, ctrl_response);
+        CORO_RETURN(e2_resp);
+      });
+}
+
+srs_du::du_mac_sched_control_config
+e2sm_rc_control_action_2_201_du_executor::convert_to_du_config_request(const e2sm_ric_control_request& e2sm_req_)
+{
+  srs_du::du_mac_sched_control_config ctrl_config = {};
+  const e2sm_rc_ctrl_hdr_format1_s&   ctrl_hdr =
+      std::get<e2sm_rc_ctrl_hdr_s>(e2sm_req_.request_ctrl_hdr).ric_ctrl_hdr_formats.ctrl_hdr_format1();
+  const e2sm_rc_ctrl_msg_format1_s& ctrl_msg =
+      std::get<e2sm_rc_ctrl_msg_s>(e2sm_req_.request_ctrl_msg).ric_ctrl_msg_formats.ctrl_msg_format1();
+
+  if (ctrl_hdr.ue_id.type() != ue_id_c::types_opts::gnb_du_ue_id) {
+    return {};
+  }
+  uint64_t gnb_cu_ue_f1ap_id = ctrl_hdr.ue_id.gnb_du_ue_id().gnb_cu_ue_f1ap_id;
+  ctrl_config.ue_id          = f1ap_ue_id_provider.get_gnb_du_ue_f1ap_id(int_to_gnb_cu_ue_f1ap_id(gnb_cu_ue_f1ap_id));
+
+  if (ctrl_config.ue_id == gnb_du_ue_f1ap_id_t::invalid) {
+    logger.info("UE Bitrate Cap Control Request received but UE not found, gNB-CU-UE-F1AP-ID={}", gnb_cu_ue_f1ap_id);
+    return {};
+  }
+
+  auto parse_action_ran_parameter_value_lambda = [this](const ran_param_value_type_c&        ran_param,
+                                                        uint64_t                             ran_param_id,
+                                                        uint64_t                             ue_id,
+                                                        srs_du::du_mac_sched_control_config& ctrl_cfg) {
+    this->parse_action_ran_parameter_value(ran_param, ran_param_id, ue_id, ctrl_cfg);
+  };
+  for (auto& ran_p : ctrl_msg.ran_p_list) {
+    if (action_params.find(ran_p.ran_param_id) != action_params.end()) {
+      parse_ran_parameter_value(ran_p.ran_param_value_type,
+                                ran_p.ran_param_id,
+                                gnb_cu_ue_f1ap_id,
+                                ctrl_config,
+                                parse_action_ran_parameter_value_lambda);
+    }
+  }
+  return ctrl_config;
+}
+
+e2sm_ric_control_response e2sm_rc_control_action_2_201_du_executor::convert_to_e2sm_response(
+    const srs_du::du_mac_sched_control_config&          du_config_req_,
+    const srs_du::du_mac_sched_control_config_response& du_response_)
+{
+  e2sm_ric_control_response e2sm_response;
+  e2sm_response.success = du_response_.bitrate_cap_result;
+
+  e2sm_response.ric_ctrl_outcome_present = false;
+  if (!e2sm_response.success) {
+    e2sm_response.cause.set_misc().value = cause_misc_e::options::unspecified;
+  }
+
+  return e2sm_response;
+}

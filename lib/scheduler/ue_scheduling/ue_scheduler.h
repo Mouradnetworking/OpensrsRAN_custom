@@ -34,6 +34,7 @@ struct cell_resource_allocator;
 class sched_ue_configuration_handler;
 class scheduler_event_logger;
 class cell_metrics_handler;
+class ue_cell;
 
 /// Request to create a new cell handler in the UE scheduler.
 struct ue_cell_scheduler_creation_request {
@@ -78,6 +79,15 @@ public:
 
   /// Return UE configurator.
   virtual sched_ue_configuration_handler& get_ue_configurator() = 0;
+
+  /// \brief Read-only lookup of a UE's cell-specific scheduling context (channel state, HARQ entities) for this
+  /// cell, given its DU-wide UE index.
+  ///
+  /// \remark This exists to support telemetry/observability consumers (e.g. scheduler_ue_state_logger) that need
+  /// to read live channel-state and HARQ information without being part of the scheduler's internal call graph.
+  /// It intentionally returns a const pointer: callers must not mutate scheduler state through it.
+  /// \return Pointer to the UE's cell context, or nullptr if the UE is not (or no longer) part of this cell.
+  virtual const ue_cell* find_ue_cell(du_ue_index_t ue_index) const = 0;
 
   /// Called when cell is activated.
   virtual void start() = 0;

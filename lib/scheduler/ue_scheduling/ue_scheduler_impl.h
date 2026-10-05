@@ -109,6 +109,8 @@ private:
     scheduler_dl_buffer_state_indication_handler& get_dl_buffer_state_indication_handler() override { return *ev_mng; }
     sched_ue_configuration_handler&               get_ue_configurator() override { return *ev_mng; }
 
+    const ue_cell* find_ue_cell(du_ue_index_t ue_index) const override { return ue_cell_db.find(ue_index); }
+
     void start() override { parent.do_start_cell(cell_res_alloc->cfg.cell_index); }
 
     void stop() override { parent.do_stop_cell(cell_res_alloc->cfg.cell_index); }

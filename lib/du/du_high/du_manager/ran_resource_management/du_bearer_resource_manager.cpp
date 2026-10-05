@@ -93,9 +93,10 @@ validate_drb_modification_request(const f1ap_drb_to_modify&                     
     return make_unexpected("DRB-Id not found");
   }
 
-  // Validate UL UP TNL INFO.
-  if (drb.uluptnl_info_list.empty()) {
-    return make_unexpected("No UL UP TNL Info List provided");
+  // A DRB modification must change at least one of: the UL UP TNL info (e.g. RRC-Reestablishment UL-TNL
+  // reassignment) or the QoS Information (e.g. an E2SM-RC DRB QoS Configuration control action updating MFBR).
+  if (drb.uluptnl_info_list.empty() and not drb.qos_info.has_value()) {
+    return make_unexpected("No UL UP TNL Info List or QoS Information provided");
   }
 
   return {};
@@ -238,6 +239,18 @@ std::vector<drb_id_t> du_bearer_resource_manager::modify_drbs(du_ue_resource_con
       logger.warning("Failed to modify {}. Cause: {}", drb_to_modify.drb_id, res.error());
       failed_drbs.push_back(drb_to_modify.drb_id);
       continue;
+    }
+
+    if (drb_to_modify.qos_info.has_value()) {
+      // Update the DRB's QoS (e.g. a new MFBR from an E2SM-RC DRB QoS Configuration control action). This is
+      // picked up automatically by the caller's subsequent scheduler reconfiguration (see
+      // create_scheduler_ue_config_request(), which reads du_ue_drb_config::qos), the same path already used for
+      // DRB setup - no separate propagation is required here.
+      du_ue_drb_config& drb = ue_cfg.drbs[drb_to_modify.drb_id];
+      drb.qos               = drb_to_modify.qos_info->drb_qos;
+      drb.mac_cfg           = drb_to_modify.qos_info->drb_qos.gbr_qos_info.has_value()
+                                   ? make_gbr_drb_mac_lc_config(*drb_to_modify.qos_info->drb_qos.gbr_qos_info)
+                                   : make_non_gbr_drb_mac_lc_config();
     }
   }
 

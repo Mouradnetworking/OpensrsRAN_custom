@@ -254,7 +254,7 @@ public:
     bs.ue_index = ue_index;
     bs.lcid     = lcid;
     bs.bs       = rlc_bs.pending_bytes;
-    // TODO: set hol_toa
+    bs.hol_toa  = rlc_bs.hol_toa;
     if (SRSRAN_UNLIKELY(not connected.load(std::memory_order_relaxed))) {
       // Discard.
       bs.bs = 0;

@@ -109,11 +109,16 @@ bool srsran::srs_cu_cp::is_valid(
     const slotted_id_vector<pdu_session_id_t, cu_cp_pdu_session_res_setup_item>& setup_items,
     const up_context&                                                            context,
     const up_resource_manager_cfg&                                               cfg,
-    const srslog::basic_logger&                                                  logger)
+    const srslog::basic_logger&                                                  logger,
+    ngap_cause_t*                                                                failure_cause)
 {
-  // Reject empty setup requests.
+  // Reject empty setup requests. Per TS 38.413, PDUSessionResourceSetupListSUReq has a mandatory minimum size of 1,
+  // so a request with an empty list is itself malformed - the generic protocol-error cause is the correct one here.
   if (setup_items.empty()) {
     logger.warning("Received empty setup list");
+    if (failure_cause != nullptr) {
+      *failure_cause = cause_protocol_t::abstract_syntax_error_falsely_constructed_msg;
+    }
     return false;
   }
 
@@ -121,6 +126,9 @@ bool srsran::srs_cu_cp::is_valid(
   for (const auto& pdu_session : setup_items) {
     if (context.pdu_sessions.find(pdu_session.pdu_session_id) != context.pdu_sessions.end()) {
       logger.info("PDU session ID {} already exists", pdu_session.pdu_session_id);
+      if (failure_cause != nullptr) {
+        *failure_cause = ngap_cause_radio_network_t::multiple_pdu_session_id_instances;
+      }
       return false;
     }
 
@@ -128,6 +136,9 @@ bool srsran::srs_cu_cp::is_valid(
     for (const auto& qos_flow : pdu_session.qos_flow_setup_request_items) {
       if (get_five_qi(qos_flow, cfg, logger) == five_qi_t::invalid) {
         logger.warning("Configuration for {} can't be derived", qos_flow.qos_flow_id);
+        if (failure_cause != nullptr) {
+          *failure_cause = ngap_cause_radio_network_t::not_supported_5qi_value;
+        }
         return false;
       }
     }
@@ -275,21 +286,50 @@ static drb_id_t modify_qos_flow(up_pdu_session_context_update&     new_session_c
 
   drb_id_t drb_id = full_context.qos_flow_map.at(qos_flow.qos_flow_id);
 
-  up_drb_context drb_ctx;
-  drb_ctx.drb_id         = drb_id;
-  drb_ctx.pdu_session_id = new_session_context.id;
+  // Start from the DRB's existing context, not a fresh one - we only want to touch what actually changes, so
+  // that fill_rrc_reconfig_args() (which consumes this) knows whether it needs to (re)signal PDCP/SDAP config
+  // to the UE, or whether this DRB entry can stay a no-op "nothing changed" one.
+  const up_drb_context& old_drb_ctx = full_context.pdu_sessions.at(new_session_context.id).drbs.at(drb_id);
+
+  five_qi_t new_five_qi   = qos_flow.qos_flow_level_qos_params.qos_desc.get_5qi();
+  bool      pdcp_changed  = new_five_qi != old_drb_ctx.qos_params.qos_desc.get_5qi();
+
+  up_drb_context drb_ctx = old_drb_ctx;
   drb_ctx.qos_params     = qos_flow.qos_flow_level_qos_params;
 
-  // Add flow.
+  // Update flow.
   up_qos_flow_context flow_ctx;
-  flow_ctx.qfi        = qos_flow.qos_flow_id;
-  flow_ctx.qos_params = qos_flow.qos_flow_level_qos_params;
-  drb_ctx.qos_flows.emplace(flow_ctx.qfi, flow_ctx);
+  flow_ctx.qfi                     = qos_flow.qos_flow_id;
+  flow_ctx.qos_params              = qos_flow.qos_flow_level_qos_params;
+  drb_ctx.qos_flows[flow_ctx.qfi] = flow_ctx;
 
-  // Set PDCP/SDAP config.
-  drb_ctx.pdcp_cfg = set_rrc_pdcp_config(qos_flow.qos_flow_level_qos_params.qos_desc.get_5qi(), cfg);
-  drb_ctx.sdap_cfg = set_rrc_sdap_config(drb_ctx);
-  drb_ctx.rlc_mod  = (drb_ctx.pdcp_cfg.rlc_mode == pdcp_rlc_mode::am) ? rlc_mode::am : rlc_mode::um_bidir;
+  // SDAP config depends on the mapped QoS flow set (plus default_drb/pdu_session_id, which never change for a
+  // modify). Computed generically - rather than assumed false - so this stays correct if the current 1:1
+  // QoS-flow-to-DRB mapping (see allocate_qos_flow() above) is ever relaxed to allow multiple flows per DRB.
+  bool sdap_changed = drb_ctx.default_drb != old_drb_ctx.default_drb ||
+                      drb_ctx.pdu_session_id != old_drb_ctx.pdu_session_id ||
+                      drb_ctx.qos_flows.size() != old_drb_ctx.qos_flows.size();
+  if (!sdap_changed) {
+    for (const auto& flow : drb_ctx.qos_flows) {
+      if (old_drb_ctx.qos_flows.find(flow.first) == old_drb_ctx.qos_flows.end()) {
+        sdap_changed = true;
+        break;
+      }
+    }
+  }
+
+  // Only (re)derive PDCP/SDAP config - and only signal it downstream - if something they actually depend on
+  // changed. Both set_rrc_pdcp_config() and set_rrc_sdap_config() are pure functions of their inputs, so
+  // re-deriving them when nothing changed would produce byte-identical output; the real bug this avoids is
+  // downstream, in fill_rrc_reconfig_args() re-signaling pdcp-Config/cnAssociation to the UE unconditionally.
+  if (pdcp_changed) {
+    drb_ctx.pdcp_cfg = set_rrc_pdcp_config(new_five_qi, cfg);
+    drb_ctx.rlc_mod  = (drb_ctx.pdcp_cfg.rlc_mode == pdcp_rlc_mode::am) ? rlc_mode::am : rlc_mode::um_bidir;
+  }
+  if (sdap_changed) {
+    drb_ctx.sdap_cfg = set_rrc_sdap_config(drb_ctx);
+  }
+  drb_ctx.pdcp_and_sdap_reconfig_required = pdcp_changed || sdap_changed;
 
   // Add modified DRB to list.
   new_session_context.drb_to_modify.emplace(drb_id, drb_ctx);

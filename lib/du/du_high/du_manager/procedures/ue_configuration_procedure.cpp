@@ -438,8 +438,21 @@ f1ap_ue_context_update_response ue_configuration_procedure::make_ue_config_respo
     }
   }
 
-  // Pack cellGroupConfig.
-  {
+  // Pack cellGroupConfig - but only if it actually carries something the CU-CP/UE need to act on. cellGroupId is
+  // a mandatory ASN.1 field, so even a "nothing changed" cell_group_cfg_s still packs to a non-empty buffer;
+  // checking the buffer length alone (as done downstream, e.g. in the F1AP UE Context Modification Response
+  // handling) is therefore not enough to detect a no-op diff. Gate on the actual optional content instead, so a
+  // request that changed nothing DU-side (e.g. a QoS-flow-parameter-only update, such as a new MFBR) doesn't
+  // cause a spurious cellGroupConfig - and, downstream, a spurious RRCReconfiguration - to be sent.
+  const bool cell_group_cfg_has_content = asn1_cell_group.rlc_bearer_to_add_mod_list.size() > 0 or
+                                          asn1_cell_group.rlc_bearer_to_release_list.size() > 0 or
+                                          asn1_cell_group.mac_cell_group_cfg_present or
+                                          asn1_cell_group.phys_cell_group_cfg_present or
+                                          asn1_cell_group.sp_cell_cfg_present or
+                                          asn1_cell_group.scell_to_add_mod_list.size() > 0 or
+                                          asn1_cell_group.scell_to_release_list.size() > 0;
+
+  if (cell_group_cfg_has_content) {
     asn1::bit_ref     bref{resp.cell_group_cfg};
     asn1::SRSASN_CODE code = asn1_cell_group.pack(bref);
     srsran_assert(code == asn1::SRSASN_SUCCESS, "Invalid cellGroupConfig");

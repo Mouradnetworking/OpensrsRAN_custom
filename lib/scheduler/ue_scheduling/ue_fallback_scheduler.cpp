@@ -1301,8 +1301,9 @@ void ue_fallback_scheduler::fill_ul_srb_grant(ue&                               
   // Save set PDCCH and PUSCH PDU parameters in HARQ process.
   h_ul->save_grant_params(ul_harq_alloc_context{pdcch.dci.type}, msg.pusch_cfg);
 
-  // Notify UL TB scheduling.
-  u.logical_channels().handle_ul_grant(msg.pusch_cfg.tb_size_bytes);
+  // Notify UL TB scheduling. Fallback-mode grants are SRB-only, and SRBs are never MFBR-tracked (see
+  // logical_channel_system::configure()), so a default-constructed, invalid slot_point is safe here.
+  u.logical_channels().handle_ul_grant(msg.pusch_cfg.tb_size_bytes, slot_point{});
 }
 
 const pdsch_time_domain_resource_allocation& ue_fallback_scheduler::get_pdsch_td_cfg(unsigned pdsch_time_res_idx) const

@@ -54,6 +54,11 @@ struct up_drb_context {
 
   pdcp_config   pdcp_cfg;
   sdap_config_t sdap_cfg;
+
+  /// \brief True if this (re)configuration requires signaling a PDCP/SDAP (re)configuration to the UE (RRC
+  /// DRB-ToAddMod's pdcp-Config/cnAssociation) and to the CU-UP. Always true for a newly-added DRB; for a
+  /// modified DRB, only true if the DRB's 5QI or QoS-flow membership actually changed.
+  bool pdcp_and_sdap_reconfig_required = true;
 };
 
 struct up_pdu_session_context {

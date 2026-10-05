@@ -641,7 +641,7 @@ endfunction()
 
 add_subdirectory(apps)
 add_subdirectory(configs)
-add_subdirectory(docs)
+add_subdirectory(build-tools/doxygen)
 add_subdirectory(external)
 add_subdirectory(lib)
 add_subdirectory(utils)

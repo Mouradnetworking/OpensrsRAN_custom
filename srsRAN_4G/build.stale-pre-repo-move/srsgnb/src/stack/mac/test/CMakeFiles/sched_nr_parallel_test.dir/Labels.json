@@ -1,0 +1,17 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/mourad6g/srsRAN_4G/srsgnb/src/stack/mac/test/sched_nr_parallel_test.cc"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"sched",
+			"nr"
+		],
+		"name" : "sched_nr_parallel_test"
+	}
+}

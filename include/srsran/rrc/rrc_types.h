@@ -69,10 +69,10 @@ struct rrc_security_config {
 
 struct rrc_radio_bearer_config {
   /// \brief Returns true if at least one of the optional vectors/fields contains an element.
-  bool contains_values()
+  bool contains_values() const
   {
-    return (srb_to_add_mod_list.empty() || drb_to_add_mod_list.empty() || drb_to_release_list.empty() ||
-            !security_cfg.has_value());
+    return !srb_to_add_mod_list.empty() || !drb_to_add_mod_list.empty() || !drb_to_release_list.empty() ||
+           security_cfg.has_value() || srb3_to_release_present;
   }
   slotted_id_vector<srb_id_t, rrc_srb_to_add_mod> srb_to_add_mod_list;
   slotted_id_vector<drb_id_t, rrc_drb_to_add_mod> drb_to_add_mod_list;
@@ -104,6 +104,14 @@ struct rrc_recfg_v1530_ies {
   byte_buffer                       ded_sib1_delivery;
   byte_buffer                       ded_sys_info_delivery;
   std::optional<rrc_other_cfg>      other_cfg;
+
+  /// \brief Returns true if at least one field actually carries content.
+  bool contains_values() const
+  {
+    return full_cfg_present || !master_cell_group.empty() || !ded_nas_msg_list.empty() ||
+           master_key_upd.has_value() || !ded_sib1_delivery.empty() || !ded_sys_info_delivery.empty() ||
+           other_cfg.has_value();
+  }
 
   // TODO: Add rrc_recfg_v1540_ies_s
   // std::optional<rrc_recfg_v1540_ies> non_crit_ext;

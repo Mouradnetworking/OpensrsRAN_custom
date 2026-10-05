@@ -22,6 +22,7 @@
 
 #include "logical_channel_system.h"
 #include "srsran/scheduler/scheduler_feedback_handler.h"
+#include "srsran/srslog/srslog.h"
 
 using namespace srsran;
 
@@ -310,6 +311,11 @@ void logical_channel_system::configure(soa::row_id ue_rid, logical_channel_confi
     // Handle GBR QoS tracking.
     const bool qos_is_tracked =
         not is_srb(ch_cfg->lcid) and ch_cfg->qos.has_value() and ch_cfg->qos.value().gbr_qos_info.has_value();
+    srslog::fetch_basic_logger("SCHED").info("lcid={}: qos_is_tracked={} has_qos={} has_gbr_info={}",
+                                             static_cast<unsigned>(ch_cfg->lcid),
+                                             qos_is_tracked,
+                                             ch_cfg->qos.has_value(),
+                                             ch_cfg->qos.has_value() ? ch_cfg->qos.value().gbr_qos_info.has_value() : false);
     if (qos_is_tracked) {
       const unsigned win_size_msec = ch_cfg->qos.value().qos.average_window_ms.value();
 
@@ -332,12 +338,53 @@ void logical_channel_system::configure(soa::row_id ue_rid, logical_channel_confi
       qos_lcgs.row(*ul_ch_ctx.qos_row)
           .at<lcg_qos_context>()
           .ul_avg_bytes_per_slot.resize(win_size_msec * ue_cfg.slots_per_msec);
+
+      // Enforce the DRB's Maximum Flow Bit Rate (MFBR), if configured. \c max_br_dl/max_br_ul are in bits per
+      // second (TS 38.473, clause 9.3.1.46's "Bit Rate" IE); the limiter's cap is in kbps. A value of 0 means "not
+      // configured" (the GBR QoS Flow Information's MFBR is mandatory in the standard when present, but srsRAN's
+      // internal struct defaults it to 0 rather than making it optional, so 0 is treated as uncapped here).
+      // Note (UL): if this LCG is shared by more than one LCID, the last one processed here wins - the same
+      // last-write-wins property the existing ul_avg_bytes_per_slot window sizing above already has for a shared
+      // LCG. See the mbr_limiter member doc on ul_logical_channel_group_context for why this is an inherent
+      // property of UL enforcement (UE-side LCP), not a shortcut specific to this implementation.
+      const uint64_t           max_br_dl_bps = ch_cfg->qos->gbr_qos_info->max_br_dl;
+      std::optional<unsigned>  mfbr_dl_kbps;
+      if (max_br_dl_bps > 0) {
+        mfbr_dl_kbps = static_cast<unsigned>(max_br_dl_bps / 1000);
+      }
+      ch_ctx.mbr_limiter.set_cap(mfbr_dl_kbps);
+      srslog::fetch_basic_logger("SCHED").info(
+          "lcid={}: MFBR DL cap {}",
+          static_cast<unsigned>(ch_cfg->lcid),
+          mfbr_dl_kbps.has_value() ? std::to_string(*mfbr_dl_kbps) + "kbps" : "none");
+
+      const uint64_t           max_br_ul_bps = ch_cfg->qos->gbr_qos_info->max_br_ul;
+      std::optional<unsigned>  mfbr_ul_kbps;
+      if (max_br_ul_bps > 0) {
+        mfbr_ul_kbps = static_cast<unsigned>(max_br_ul_bps / 1000);
+      }
+      ul_ch_ctx.mbr_limiter.set_cap(mfbr_ul_kbps);
+      srslog::fetch_basic_logger("SCHED").info(
+          "lcid={}: MFBR UL cap {}",
+          static_cast<unsigned>(ch_cfg->lcid),
+          mfbr_ul_kbps.has_value() ? std::to_string(*mfbr_ul_kbps) + "kbps" : "none");
+      if (mfbr_ul_kbps.has_value() and ul_ch_ctx.slice_id.has_value()) {
+        // An MFBR-capped UL LCG must always remain a schedulable candidate, even when its last-known BSR-derived
+        // backlog reads zero - otherwise the scheduler can never grant it the PUSCH resource needed to report an
+        // updated buffer status in the first place (TS 38.321's Regular/Periodic BSR both require an existing
+        // grant to be transmitted at all), stalling the GBR flow's feedback loop entirely between SR
+        // opportunities. See ue_logical_channel_repository::has_ul_mfbr_cap()'s doc comment.
+        slices.at(*ul_ch_ctx.slice_id).pending_ul_ues.set(ue_cfg.ue_index, true);
+      }
     } else {
       // Remove from QoS tracking.
       if (ch_ctx.qos_row.has_value()) {
         qos_channels.erase(*ch_ctx.qos_row);
         ch_ctx.qos_row.reset();
       }
+      // Non-GBR (or non-DRB) logical channel: no MFBR can be configured, ensure any previous cap is cleared.
+      ch_ctx.mbr_limiter.set_cap(std::nullopt);
+      ul_ch_ctx.mbr_limiter.set_cap(std::nullopt);
       // TODO: Ensure all LCIDs associated with this LCG are non-GBR before removing LCG QoS tracking.
       if (ul_ch_ctx.qos_row.has_value()) {
         qos_lcgs.erase(*ul_ch_ctx.qos_row);
@@ -642,7 +689,18 @@ void logical_channel_system::on_single_lcg_buf_st_update(ue_row&                
   if ((prev_slice_pending_bytes > 0) != (slice_pending_bytes > 0)) {
     // zero crossing detected. Update the slice UE with pending data bitmap.
     auto& ue_cfg = u.at<ue_config_context>();
-    slices.at(*slice_id).pending_ul_ues.set(ue_cfg.ue_index, slice_pending_bytes > 0);
+    // An MFBR-capped UL LCG must always remain a schedulable candidate, even when this LCG's own backlog just
+    // crossed down to zero - see the matching comment in configure() for why. Preserve the bit here rather than
+    // letting a legitimate zero-crossing on this LCG clear it if some other LCG on the UE (or this same one, once
+    // more data arrives) is still MFBR-capped.
+    bool ue_wide_mfbr_capped = false;
+    for (const auto& [other_lcgid, other_ul_ch_ctx] : u.at<ue_ul_channel_context>().lcgs) {
+      if (other_ul_ch_ctx.active and other_ul_ch_ctx.mbr_limiter.is_capped()) {
+        ue_wide_mfbr_capped = true;
+        break;
+      }
+    }
+    slices.at(*slice_id).pending_ul_ues.set(ue_cfg.ue_index, slice_pending_bytes > 0 or ue_wide_mfbr_capped);
   }
 }
 
@@ -736,17 +794,26 @@ lcid_t logical_channel_system::get_max_prio_lcid(const const_ue_row& u) const
   return INVALID_LCID;
 }
 
-unsigned
-logical_channel_system::allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& subpdu, lcid_t lcid, unsigned rem_bytes)
+unsigned logical_channel_system::allocate_mac_sdu(
+    soa::row_id ue_rid, dl_msg_lc_info& subpdu, lcid_t lcid, unsigned rem_bytes, slot_point sl_tx)
 {
   srsran_sanity_check(lcid < MAX_NOF_RB_LCIDS, "Max LCID value 32 exceeded");
+  auto                         u         = get_ue(ue_rid);
+  auto&                        ue_ch_ctx = u.at<ue_channel_context>();
+  dl_logical_channel_context&  ch_ctx    = ue_ch_ctx.channels.at(lcid);
+
+  // Clamp the available space by the DRB's remaining MFBR budget for this slot, if a cap is configured (no-op,
+  // negligible cost otherwise - see \c ue_bitrate_limiter). This is enforced as just another ceiling on
+  // \c rem_bytes, the same conceptual role played by the existing UE-aggregate bitrate cap in
+  // grant_params_selector.cpp - it composes with it automatically since both ultimately bound the same value.
+  const unsigned mfbr_budget = ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx);
+  rem_bytes = std::min(rem_bytes, mfbr_budget);
+
   const unsigned min_bytes_needed = get_mac_sdu_with_subhdr_and_rlc_hdr_estim(lcid, 1);
   if (rem_bytes < min_bytes_needed) {
-    // There is no space even for a minimal MAC SDU.
+    // There is no space even for a minimal MAC SDU (either because of the TB budget, or the MFBR budget).
     return 0;
   }
-  auto  u         = get_ue(ue_rid);
-  auto& ue_ch_ctx = u.at<ue_channel_context>();
 
   unsigned lch_bytes_and_subhr = pending_bytes(u, lcid);
   if (lch_bytes_and_subhr == 0) {
@@ -775,9 +842,8 @@ logical_channel_system::allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& sub
   const unsigned sdu_size = get_mac_sdu_size(alloc_bytes);
 
   // Update DL Buffer Status to avoid reallocating the same LCID bytes.
-  dl_logical_channel_context& ch_ctx           = ue_ch_ctx.channels.at(lcid);
-  const unsigned              last_sched_bytes = std::min(sdu_size, ch_ctx.buf_st);
-  auto                        new_buf_st       = ch_ctx.buf_st - last_sched_bytes;
+  const unsigned last_sched_bytes = std::min(sdu_size, ch_ctx.buf_st);
+  auto           new_buf_st       = ch_ctx.buf_st - last_sched_bytes;
   if (lcid != LCID_SRB0 and new_buf_st > 0) {
     // Allocation was not enough to empty the logical channel. In this specific case, we add some bytes to account
     // for the RLC segmentation overhead.
@@ -793,6 +859,9 @@ logical_channel_system::allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& sub
     qos_channels.at<qos_context>(*ch_ctx.qos_row).dl_last_sched_bytes = last_sched_bytes;
   }
 
+  // Deduct the actually granted bytes (including MAC subheader) from the DRB's MFBR budget. No-op if uncapped.
+  ch_ctx.mbr_limiter.consume(sl_tx, alloc_bytes);
+
   // Set subPDU info.
   subpdu.lcid        = lcid;
   subpdu.sched_bytes = sdu_size;
@@ -800,8 +869,8 @@ logical_channel_system::allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& sub
   return alloc_bytes;
 }
 
-unsigned
-logical_channel_system::allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& subpdu, unsigned rem_bytes, lcid_t lcid)
+unsigned logical_channel_system::allocate_mac_sdu(
+    soa::row_id ue_rid, dl_msg_lc_info& subpdu, unsigned rem_bytes, lcid_t lcid, slot_point sl_tx)
 {
   subpdu.lcid        = lcid_dl_sch_t::MIN_RESERVED;
   subpdu.sched_bytes = 0;
@@ -812,7 +881,7 @@ logical_channel_system::allocate_mac_sdu(soa::row_id ue_rid, dl_msg_lc_info& sub
   }
 
   // Update Buffer Status of allocated LCID.
-  return allocate_mac_sdu(ue_rid, subpdu, lcid_with_prio, rem_bytes);
+  return allocate_mac_sdu(ue_rid, subpdu, lcid_with_prio, rem_bytes, sl_tx);
 }
 
 unsigned logical_channel_system::allocate_mac_ce(soa::row_id ue_rid, dl_msg_lc_info& subpdu, unsigned rem_bytes)
@@ -939,6 +1008,27 @@ unsigned ue_logical_channel_repository::dl_pending_bytes() const
   return bytes;
 }
 
+unsigned ue_logical_channel_repository::dl_pending_bytes_mfbr_capped(slot_point sl_tx) const
+{
+  auto u = get_ue_row();
+  if (u.at<ue_context>().fallback_state) {
+    // Fallback (SRB-only) channels are never MFBR-tracked.
+    return pending_con_res_ce_bytes() + pending_bytes(LCID_SRB0) + pending_bytes(LCID_SRB1);
+  }
+  unsigned bytes = pending_ce_bytes();
+  auto&    ue_ch = u.at<ue_channel_context>();
+  for (lcid_t lcid : ue_ch.sorted_channels) {
+    if (lcid == LCID_SRB0) {
+      continue;
+    }
+    const auto& ch_ctx = ue_ch.channels.at(lcid);
+    const unsigned raw_pending = pending_bytes(lcid);
+    const unsigned budget      = ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx);
+    bytes += std::min(raw_pending, budget);
+  }
+  return bytes;
+}
+
 unsigned ue_logical_channel_repository::ul_pending_bytes() const
 {
   auto u = get_ue_row();
@@ -950,6 +1040,48 @@ unsigned ue_logical_channel_repository::ul_pending_bytes() const
     bytes += pending_bytes(lcgid);
   }
   return bytes;
+}
+
+unsigned ue_logical_channel_repository::ul_pending_bytes_mfbr_capped(slot_point sl_tx) const
+{
+  auto u = get_ue_row();
+  if (u.at<ue_context>().fallback_state) {
+    // Fallback (SRB-only) LCG is never MFBR-tracked.
+    return pending_bytes(uint_to_lcg_id(0U));
+  }
+  unsigned bytes = 0;
+  for (const auto& [lcgid, ul_ch_ctx] : u.at<ue_ul_channel_context>().lcgs) {
+    unsigned lcg_bytes = std::min(pending_bytes(lcgid), ul_ch_ctx.mbr_limiter.get_max_grantable_bytes(sl_tx));
+    if (ul_ch_ctx.mbr_limiter.is_capped() and lcg_bytes > 0) {
+      // Reserve a small amount of headroom so an MFBR-capped grant is never sized to an exact byte fit. Unlike
+      // the DL, the gNB has no ground truth of the UE's real UL backlog - it relies on the UE's own BSR reports,
+      // and TS 38.321's Regular BSR only re-triggers when new data arrives at a previously-empty queue (which
+      // won't happen while continuous traffic keeps the queue non-empty). The only other way the UE refreshes
+      // its buffer status is an opportunistic Padding BSR when a grant has leftover space; a tightly-capped
+      // grant sized to an exact byte fit leaves none, so the last-reported (and by then stale) buffer status
+      // never gets updated, and the scheduler ends up indefinitely re-granting the same stale amount instead of
+      // tracking real, continuously-arriving traffic. This headroom is a no-op whenever the LCG isn't actually
+      // MFBR-capped (the common case), since it never applies there.
+      static constexpr unsigned UL_BSR_HEADROOM_BYTES = 4;
+      lcg_bytes += UL_BSR_HEADROOM_BYTES;
+    }
+    bytes += lcg_bytes;
+  }
+  return bytes;
+}
+
+bool ue_logical_channel_repository::has_ul_mfbr_cap() const
+{
+  auto u = get_ue_row();
+  if (u.at<ue_context>().fallback_state) {
+    return false;
+  }
+  for (const auto& [lcgid, ul_ch_ctx] : u.at<ue_ul_channel_context>().lcgs) {
+    if (ul_ch_ctx.active and ul_ch_ctx.mbr_limiter.is_capped()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 double ue_logical_channel_repository::average_dl_bit_rate(lcid_t lcid) const
@@ -998,9 +1130,10 @@ void ue_logical_channel_repository::handle_sr_indication()
   parent->ues_with_pending_sr.set(ue_index, true);
 }
 
-unsigned ue_logical_channel_repository::allocate_mac_sdu(dl_msg_lc_info& lch_info, unsigned rem_bytes, lcid_t lcid)
+unsigned
+ue_logical_channel_repository::allocate_mac_sdu(dl_msg_lc_info& lch_info, unsigned rem_bytes, slot_point sl_tx, lcid_t lcid)
 {
-  return parent->allocate_mac_sdu(ue_row_id, lch_info, rem_bytes, lcid);
+  return parent->allocate_mac_sdu(ue_row_id, lch_info, rem_bytes, lcid, sl_tx);
 }
 
 unsigned ue_logical_channel_repository::allocate_mac_ce(dl_msg_lc_info& lch_info, unsigned rem_bytes)
@@ -1013,7 +1146,7 @@ unsigned ue_logical_channel_repository::allocate_ue_con_res_id_mac_ce(dl_msg_lc_
   return parent->allocate_ue_con_res_id_mac_ce(ue_row_id, lch_info, rem_bytes);
 }
 
-void ue_logical_channel_repository::handle_ul_grant(unsigned grant_size)
+void ue_logical_channel_repository::handle_ul_grant(unsigned grant_size, slot_point sl_tx)
 {
   // Reset any pending SR indication.
   reset_sr_indication();
@@ -1032,6 +1165,9 @@ void ue_logical_channel_repository::handle_ul_grant(unsigned grant_size)
         qos_ctx.ul_last_sched_bytes += bytes_sched;
         qos_ctx.sched_bytes_accum += bytes_sched;
         grant_size -= bytes_sched;
+
+        // Deduct the bytes apportioned to this LCG from its MFBR budget. No-op if uncapped.
+        lcg_ctx.mbr_limiter.consume(sl_tx, bytes_sched);
       }
     }
   }
@@ -1045,6 +1181,7 @@ void ue_logical_channel_repository::reset_sr_indication()
 unsigned srsran::allocate_mac_sdus(dl_msg_tb_info&                tb_info,
                                    ue_logical_channel_repository& lch_mng,
                                    unsigned                       total_tbs,
+                                   slot_point                     sl_tx,
                                    lcid_t                         lcid)
 {
   static constexpr unsigned min_mac_sdu_space = 4; // Needs to fit at least MAC SDU subheader and RLC header.
@@ -1054,7 +1191,7 @@ unsigned srsran::allocate_mac_sdus(dl_msg_tb_info&                tb_info,
   // Note: We assume upper layer accounts for its own subheaders when updating the buffer state.
   while (rem_tbs > min_mac_sdu_space and not tb_info.lc_chs_to_sched.full()) {
     dl_msg_lc_info subpdu;
-    unsigned       alloc_bytes = lch_mng.allocate_mac_sdu(subpdu, rem_tbs, lcid);
+    unsigned       alloc_bytes = lch_mng.allocate_mac_sdu(subpdu, rem_tbs, sl_tx, lcid);
     if (alloc_bytes == 0) {
       break;
     }
@@ -1113,28 +1250,35 @@ unsigned srsran::build_dl_fallback_transport_block_info(dl_msg_tb_info&         
                                                         ue_logical_channel_repository& lch_mng,
                                                         unsigned                       tb_size_bytes)
 {
+  // Note: SRBs are never GBR/MFBR-tracked (see logical_channel_system::configure()), so a default-constructed,
+  // invalid slot_point is safe here - allocate_mac_sdu()'s MFBR clamp is a no-op for an uncapped channel
+  // regardless of the slot_point value passed in.
   unsigned total_subpdu_bytes = 0;
   total_subpdu_bytes += allocate_ue_con_res_id_mac_ce(tb_info, lch_mng, tb_size_bytes);
   // Since SRB0 PDU cannot be segmented, skip SRB0 if remaining TB size is not enough to fit entire PDU.
   if (lch_mng.has_pending_bytes(LCID_SRB0) and
       ((tb_size_bytes - total_subpdu_bytes) >= lch_mng.pending_bytes(LCID_SRB0))) {
-    total_subpdu_bytes += allocate_mac_sdus(tb_info, lch_mng, tb_size_bytes - total_subpdu_bytes, LCID_SRB0);
+    total_subpdu_bytes +=
+        allocate_mac_sdus(tb_info, lch_mng, tb_size_bytes - total_subpdu_bytes, slot_point{}, LCID_SRB0);
     return total_subpdu_bytes;
   }
-  total_subpdu_bytes += allocate_mac_sdus(tb_info, lch_mng, tb_size_bytes - total_subpdu_bytes, LCID_SRB1);
+  total_subpdu_bytes +=
+      allocate_mac_sdus(tb_info, lch_mng, tb_size_bytes - total_subpdu_bytes, slot_point{}, LCID_SRB1);
   return total_subpdu_bytes;
 }
 
 unsigned srsran::build_dl_transport_block_info(dl_msg_tb_info&                tb_info,
                                                ue_logical_channel_repository& lch_mng,
                                                unsigned                       tb_size_bytes,
-                                               ran_slice_id_t                 slice_id)
+                                               ran_slice_id_t                 slice_id,
+                                               slot_point                     sl_tx)
 {
   unsigned total_subpdu_bytes = 0;
   total_subpdu_bytes += allocate_mac_ces(tb_info, lch_mng, tb_size_bytes);
   for (const auto lcid : lch_mng.get_prioritized_logical_channels()) {
     if (lch_mng.get_slice_id(lcid) == slice_id) {
-      total_subpdu_bytes += allocate_mac_sdus(tb_info, lch_mng, tb_size_bytes - total_subpdu_bytes, uint_to_lcid(lcid));
+      total_subpdu_bytes +=
+          allocate_mac_sdus(tb_info, lch_mng, tb_size_bytes - total_subpdu_bytes, sl_tx, uint_to_lcid(lcid));
     }
   }
   return total_subpdu_bytes;

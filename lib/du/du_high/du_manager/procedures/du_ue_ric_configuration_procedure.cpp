@@ -55,13 +55,15 @@ manual_event<du_mac_sched_control_config_response>& du_ue_ric_configuration_proc
   // Find UE context based on F1AP UE ID.
   ue = ue_mng.find_f1ap_ue_id(request.ue_id);
   if (ue == nullptr) {
-    du_mac_sched_control_config_response fail{false, false, false};
+    du_mac_sched_control_config_response fail{false, false, false, false};
     ue_config_completed.set(fail);
     return ue_config_completed;
   }
 
-  if (request.rrm_policy_ratio_list.empty()) {
-    du_mac_sched_control_config_response fail{false, false, false};
+  if (request.rrm_policy_ratio_list.empty() and not request.max_dl_bitrate_kbps.has_value() and
+      not request.max_ul_bitrate_kbps.has_value()) {
+    // Nothing to configure.
+    du_mac_sched_control_config_response fail{false, false, false, false};
     ue_config_completed.set(fail);
     return ue_config_completed;
   }
@@ -78,8 +80,8 @@ manual_event<du_mac_sched_control_config_response>& du_ue_ric_configuration_proc
                                }
 
                                // Signal completion of UE configuration to external coroutine.
-                               ue_config_completed.set(
-                                   du_mac_sched_control_config_response{result.result, result.result, result.result});
+                               ue_config_completed.set(du_mac_sched_control_config_response{
+                                   result.result, result.result, result.result, result.result});
 
                                CORO_RETURN();
                              }));
@@ -99,24 +101,32 @@ async_task<mac_ue_reconfiguration_response> du_ue_ric_configuration_procedure::h
   mac_request.sched_cfg.res_alloc_cfg.emplace();
   auto& res_alloc_cfg = mac_request.sched_cfg.res_alloc_cfg.value();
   // For now take first parameter set, in future we will have to support multiple parameter sets for different slices.
-  res_alloc_cfg.rrm_policy_group = request.rrm_policy_ratio_list[0];
+  // Note: requests that do not carry a PRB quota (e.g. a bitrate-cap-only request) leave the grant size limits at
+  // their "unrestricted" defaults, since this struct is fully replaced (not merged) on every request.
+  if (not request.rrm_policy_ratio_list.empty()) {
+    res_alloc_cfg.rrm_policy_group = request.rrm_policy_ratio_list[0];
 
-  // TODO remove when RRM group support is added to scheduler.
-  unsigned nof_prbs = get_max_Nprb(du_params.ran.cells[0].dl_carrier.carrier_bw_mhz,
-                                   du_params.ran.cells[0].scs_common,
-                                   band_helper::get_freq_range(du_params.ran.cells[0].dl_carrier.band));
+    // TODO remove when RRM group support is added to scheduler.
+    unsigned nof_prbs = get_max_Nprb(du_params.ran.cells[0].dl_carrier.carrier_bw_mhz,
+                                     du_params.ran.cells[0].scs_common,
+                                     band_helper::get_freq_range(du_params.ran.cells[0].dl_carrier.band));
 
-  unsigned min_prb_ratio = res_alloc_cfg.rrm_policy_group.minimum_ratio.value_or(0);
-  unsigned max_prb_ratio = res_alloc_cfg.rrm_policy_group.maximum_ratio.value_or(100);
+    unsigned min_prb_ratio = res_alloc_cfg.rrm_policy_group.minimum_ratio.value_or(0);
+    unsigned max_prb_ratio = res_alloc_cfg.rrm_policy_group.maximum_ratio.value_or(100);
 
-  min_prb_ratio = std::clamp(min_prb_ratio, static_cast<unsigned>(0), static_cast<unsigned>(100));
-  max_prb_ratio = std::clamp(max_prb_ratio, static_cast<unsigned>(0), static_cast<unsigned>(100));
+    min_prb_ratio = std::clamp(min_prb_ratio, static_cast<unsigned>(0), static_cast<unsigned>(100));
+    max_prb_ratio = std::clamp(max_prb_ratio, static_cast<unsigned>(0), static_cast<unsigned>(100));
 
-  unsigned min_prb_limit = static_cast<int>((1.0 * min_prb_ratio / 100) * nof_prbs);
-  unsigned max_prb_limit = static_cast<int>((1.0 * max_prb_ratio / 100) * nof_prbs);
+    unsigned min_prb_limit = static_cast<int>((1.0 * min_prb_ratio / 100) * nof_prbs);
+    unsigned max_prb_limit = static_cast<int>((1.0 * max_prb_ratio / 100) * nof_prbs);
 
-  res_alloc_cfg.pdsch_grant_size_limits = {min_prb_limit, max_prb_limit};
-  res_alloc_cfg.pusch_grant_size_limits = {min_prb_limit, max_prb_limit};
+    res_alloc_cfg.pdsch_grant_size_limits = {min_prb_limit, max_prb_limit};
+    res_alloc_cfg.pusch_grant_size_limits = {min_prb_limit, max_prb_limit};
+  }
+
+  // Bitrate caps (throughput control), independent of the PRB-quota mechanism above.
+  res_alloc_cfg.max_dl_bitrate_kbps = request.max_dl_bitrate_kbps;
+  res_alloc_cfg.max_ul_bitrate_kbps = request.max_ul_bitrate_kbps;
 
   res_alloc_cfg.max_pdsch_harq_retxs = request.num_harq_retransmissions.has_value()
                                            ? request.num_harq_retransmissions.value()

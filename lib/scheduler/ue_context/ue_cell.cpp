@@ -116,6 +116,9 @@ void ue_cell::handle_reconfiguration_request(const ue_cell_configuration& ue_cel
   }
 
   get_pusch_power_controller().reconfigure(ue_cell_cfg);
+
+  dl_bitrate_limiter_.set_cap(ue_cell_cfg.rrm_cfg().max_dl_bitrate_kbps);
+  ul_bitrate_limiter_.set_cap(ue_cell_cfg.rrm_cfg().max_ul_bitrate_kbps);
 }
 
 void ue_cell::set_fallback_state(bool set_fallback, bool is_reconfig, bool reestablished)
@@ -198,6 +201,10 @@ int ue_cell::handle_crc_pdu(slot_point pusch_slot, const ul_crc_pdu_indication& 
     // Update PUSCH SNR reported from PHY.
     if (crc_pdu.ul_sinr_dB.has_value()) {
       channel_state.update_pusch_snr(crc_pdu.ul_sinr_dB.value());
+    }
+    // Update PUSCH RSRP reported from PHY.
+    if (crc_pdu.ul_rsrp_dBFS.has_value()) {
+      channel_state.update_pusch_rsrp(crc_pdu.ul_rsrp_dBFS.value());
     }
   }
 

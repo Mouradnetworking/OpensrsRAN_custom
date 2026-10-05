@@ -32,6 +32,7 @@
 #include "config/cell_configuration.h"
 #include "logging/scheduler_event_logger.h"
 #include "logging/scheduler_result_logger.h"
+#include "logging/scheduler_ue_state_logger.h"
 #include "pdcch_scheduling/pdcch_resource_allocator_impl.h"
 #include "pucch_scheduling/pucch_allocator_impl.h"
 #include "uci_scheduling/uci_allocator_impl.h"
@@ -96,7 +97,10 @@ private:
   scheduler_event_logger  event_logger;
   cell_metrics_handler&   metrics;
   scheduler_result_logger result_logger;
-  srslog::basic_logger&   logger;
+  /// Experimental per-slot, per-UE RAN-state telemetry exporter (see scheduler_ue_state_logger.h). No-op unless
+  /// SRSRAN_UE_STATE_PIPE is set in the environment.
+  scheduler_ue_state_logger ue_state_logger;
+  srslog::basic_logger&     logger;
 
   ssb_scheduler                 ssb_sch;
   pdcch_resource_allocator_impl pdcch_sch;

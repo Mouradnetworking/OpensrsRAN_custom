@@ -284,6 +284,10 @@ void ue_cell_grid_allocator::set_pdsch_params(dl_grant_info&                    
                      u.crnti);
     }
     mcs_tbs_info = mcs_or_error.value_or(sch_mcs_tbs{sch_mcs_index{0}, 0});
+
+    // Throughput cap: account for the bytes actually granted (retransmissions are not throttled/counted, see the
+    // corresponding clamp in grant_params_selector.cpp).
+    ue_cc.dl_bitrate_limiter().consume(pdsch_alloc.slot, mcs_tbs_info.tbs);
   }
 
   // Mark resources as occupied in the ResourceGrid.
@@ -389,7 +393,8 @@ void ue_cell_grid_allocator::set_pdsch_params(dl_grant_info&                    
     build_dl_transport_block_info(msg.tb_list.emplace_back(),
                                   u.logical_channels(),
                                   msg.pdsch_cfg.codewords[0].tb_size_bytes,
-                                  grant.user->ran_slice_id());
+                                  grant.user->ran_slice_id(),
+                                  pdsch_alloc.slot);
 
     // Update context with buffer occupancy after the TB is built.
     msg.context.buffer_occupancy = u.logical_channels().dl_pending_bytes();
@@ -658,6 +663,10 @@ void ue_cell_grid_allocator::set_pusch_params(ul_grant_info& grant, const vrb_in
               ue_cell_cfg.init_bwp().ul_ded->pusch_cfg->pusch_mapping_type_a_dmrs.value().additional_positions));
     }
 
+    // Throughput cap: account for the bytes actually granted (retransmissions are not throttled/counted, see the
+    // corresponding clamp in grant_params_selector.cpp).
+    ue_cc.ul_bitrate_limiter().consume(pusch_alloc.slot, mcs_tbs_info.value().tbs);
+
   } else {
     // If it's a reTx, fetch the MCS, TBS and number of layers from the previous transmission.
     const auto& prev_params = grant.h_ul.get_grant_params();
@@ -790,7 +799,7 @@ void ue_cell_grid_allocator::set_pusch_params(ul_grant_info& grant, const vrb_in
   grant.h_ul.save_grant_params(pusch_sched_ctx, msg.pusch_cfg);
 
   // Register UL allocations for this slot.
-  u.logical_channels().handle_ul_grant(grant.h_ul.get_grant_params().tbs_bytes);
+  u.logical_channels().handle_ul_grant(grant.h_ul.get_grant_params().tbs_bytes, pusch_alloc.slot);
 
   // Update DRX state given the new allocation.
   u.drx_controller().on_new_ul_pdcch_alloc(pdcch_alloc.slot, pusch_alloc.slot);

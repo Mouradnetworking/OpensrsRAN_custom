@@ -25,6 +25,8 @@
 #include "srsran/du/du_cell_config.h"
 #include "srsran/f1ap/f1ap_ue_id_types.h"
 #include "srsran/ran/nr_cgi.h"
+#include "srsran/ran/qos/five_qi.h"
+#include "srsran/ran/rb_id.h"
 #include <future>
 
 using namespace asn1::e2ap;
@@ -220,5 +222,132 @@ void e2sm_rc_control_action_3_1_cu_executor::parse_action_ran_parameter_value(
       ctrl_cfg.target_cell_id.nci = nr_cell_identity::create(nr_cgi_asn.nr_cell_id.to_number()).value();
       ctrl_cfg.target_cell_id.plmn_id.parse(nr_cgi_asn.plmn_id.to_string());
     }
+  }
+}
+
+e2sm_rc_control_action_1_1_cu_executor::e2sm_rc_control_action_1_1_cu_executor(cu_configurator& cu_configurator_) :
+  e2sm_rc_control_action_cu_executor_base(cu_configurator_, 1)
+{
+  action_name = "DRB QoS Configuration";
+  action_params.insert({1, "DRB ID"});
+  action_params.insert({2, "5QI"});
+  action_params.insert({12, "QoS parameters for GBR flows in NG-RAN Bearer"});
+  action_params.insert({13, "Maximum Flow Bit Rate Downlink"});
+  action_params.insert({16, "Maximum Flow Bit Rate Uplink"});
+  // TODO: add parameters 3-11, 14-15, 17-22 (Packet Delay/Error Rate, ARP, GFBR, packet loss rate, QoS
+  // monitoring) when supported.
+}
+
+bool e2sm_rc_control_action_1_1_cu_executor::ric_control_action_supported(const e2sm_ric_control_request& req)
+{
+  return true;
+}
+
+async_task<e2sm_ric_control_response>
+e2sm_rc_control_action_1_1_cu_executor::execute_ric_control_action(const e2sm_ric_control_request& req)
+{
+  const e2sm_rc_ctrl_hdr_format1_s& ctrl_hdr =
+      std::get<e2sm_rc_ctrl_hdr_s>(req.request_ctrl_hdr).ric_ctrl_hdr_formats.ctrl_hdr_format1();
+  const e2sm_rc_ctrl_msg_format1_s& ctrl_msg =
+      std::get<e2sm_rc_ctrl_msg_s>(req.request_ctrl_msg).ric_ctrl_msg_formats.ctrl_msg_format1();
+
+  if (ctrl_hdr.ue_id.type() != ue_id_c::types_opts::gnb_ue_id) {
+    return return_ctrl_failure(req);
+  }
+  const ue_id_gnb_s& gnb_ue_id = ctrl_hdr.ue_id.gnb_ue_id();
+  if (gnb_ue_id.gnb_cu_ue_f1ap_id_list.size() == 0) {
+    return return_ctrl_failure(req);
+  }
+
+  // Translate UE-IDs.
+  srs_cu_cp::amf_ue_id_t amf_ue_id = srs_cu_cp::uint_to_amf_ue_id(gnb_ue_id.amf_ue_ngap_id);
+  srs_cu_cp::guami_t     guami;
+  guami.plmn.from_bytes(gnb_ue_id.guami.plmn_id.to_bytes());
+  guami.amf_set_id                    = static_cast<uint16_t>(gnb_ue_id.guami.amf_set_id.to_number());
+  guami.amf_pointer                   = static_cast<uint8_t>(gnb_ue_id.guami.amf_pointer.to_number());
+  guami.amf_region_id                 = static_cast<uint8_t>(gnb_ue_id.guami.amf_region_id.to_number());
+  uint64_t              gnb_cu_ue_f1ap_id_uint = gnb_ue_id.gnb_cu_ue_f1ap_id_list[0].gnb_cu_ue_f1ap_id;
+  gnb_cu_ue_f1ap_id_t   gnb_cu_ue_f1ap_id      = int_to_gnb_cu_ue_f1ap_id(gnb_cu_ue_f1ap_id_uint);
+  srs_cu_cp::ue_index_t ue_index = cu_param_configurator.get_ue_index(amf_ue_id, guami, gnb_cu_ue_f1ap_id);
+
+  if (ue_index == srs_cu_cp::ue_index_t::invalid) {
+    logger.error("Ignoring DRB QoS Configuration Request. Cause: Couldn't find UE index for given UE-IDs.");
+    return return_ctrl_failure(req);
+  }
+
+  cu_qos_flow_control_config qos_ctrl_cfg;
+  auto parse_action_ran_parameter_value_lambda = [this](const ran_param_value_type_c& ran_param,
+                                                        uint64_t                      ran_param_id,
+                                                        uint64_t                      ue_id,
+                                                        cu_qos_flow_control_config&   ctrl_cfg) {
+    this->parse_action_ran_parameter_value(ran_param, ran_param_id, ue_id, ctrl_cfg);
+  };
+  for (auto& ran_p : ctrl_msg.ran_p_list) {
+    if (action_params.find(ran_p.ran_param_id) != action_params.end()) {
+      parse_ran_parameter_value(ran_p.ran_param_value_type,
+                                ran_p.ran_param_id,
+                                srs_cu_cp::ue_index_to_uint(ue_index),
+                                qos_ctrl_cfg,
+                                parse_action_ran_parameter_value_lambda);
+    }
+  }
+
+  if (qos_ctrl_cfg.drb_id == drb_id_t::invalid) {
+    logger.error("ue={}: Ignoring DRB QoS Configuration Request. Cause: Missing DRB ID.", ue_index);
+    return return_ctrl_failure(req);
+  }
+
+  logger.info("ue={}: Executing E2SM-RC DRB QoS Configuration for {}", ue_index, qos_ctrl_cfg.drb_id);
+
+  return launch_async(
+      [this, ue_index, qos_ctrl_cfg](coro_context<async_task<e2sm_ric_control_response>>& ctx) {
+        bool accepted = false;
+        CORO_BEGIN(ctx);
+        CORO_AWAIT_VALUE(accepted, cu_param_configurator.trigger_qos_flow_modification(ue_index, qos_ctrl_cfg));
+
+        e2sm_ric_control_response e2sm_response;
+        e2sm_response.success = accepted;
+        if (!e2sm_response.success) {
+          e2sm_response.cause.set_misc().value = cause_misc_e::options::unspecified;
+        }
+        CORO_RETURN(e2sm_response);
+      });
+}
+
+void e2sm_rc_control_action_1_1_cu_executor::parse_action_ran_parameter_value(
+    const asn1::e2sm::ran_param_value_type_c& ran_p,
+    uint64_t                                  ran_param_id,
+    uint64_t                                  ue_id,
+    cu_qos_flow_control_config&               ctrl_cfg)
+{
+  if (ran_p.type() != ran_param_value_type_c::types_opts::ran_p_choice_elem_false) {
+    // Structure/list container IDs (e.g. RAN Parameter ID 12) are handled purely by recursing into their
+    // children; they carry no leaf value themselves.
+    return;
+  }
+  if (not ran_p.ran_p_choice_elem_false().ran_param_value_present) {
+    return;
+  }
+  const auto& value = ran_p.ran_p_choice_elem_false().ran_param_value;
+  if (value.type() != ran_param_value_c::types_opts::value_int) {
+    logger.error("Ignoring RAN Parameter ID {}: expected an INTEGER value", ran_param_id);
+    return;
+  }
+
+  switch (ran_param_id) {
+    case 1: // DRB ID
+      ctrl_cfg.drb_id = uint_to_drb_id(static_cast<uint8_t>(value.value_int()));
+      break;
+    case 2: // 5QI
+      ctrl_cfg.five_qi = uint_to_five_qi(static_cast<uint16_t>(value.value_int()));
+      break;
+    case 13: // Maximum Flow Bit Rate Downlink
+      ctrl_cfg.max_flow_bit_rate_dl = static_cast<uint64_t>(value.value_int());
+      break;
+    case 16: // Maximum Flow Bit Rate Uplink
+      ctrl_cfg.max_flow_bit_rate_ul = static_cast<uint64_t>(value.value_int());
+      break;
+    default:
+      break;
   }
 }

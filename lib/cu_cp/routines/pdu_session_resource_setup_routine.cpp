@@ -102,10 +102,12 @@ void pdu_session_resource_setup_routine::operator()(
   logger.debug("ue={}: \"{}\" started...", setup_msg.ue_index, name());
 
   // Perform initial sanity checks on incoming message.
-  if (!up_resource_mng.validate_request(setup_msg.pdu_session_res_setup_items)) {
-    logger.info("ue={}: \"{}\" Invalid PduSessionResourceSetup", setup_msg.ue_index, name());
-    CORO_EARLY_RETURN(handle_pdu_session_resource_setup_result(
-        false, cause_protocol_t::abstract_syntax_error_falsely_constructed_msg));
+  {
+    ngap_cause_t validation_failure_cause = cause_protocol_t::abstract_syntax_error_falsely_constructed_msg;
+    if (!up_resource_mng.validate_request(setup_msg.pdu_session_res_setup_items, &validation_failure_cause)) {
+      logger.info("ue={}: \"{}\" Invalid PduSessionResourceSetup", setup_msg.ue_index, name());
+      CORO_EARLY_RETURN(handle_pdu_session_resource_setup_result(false, validation_failure_cause));
+    }
   }
 
   {

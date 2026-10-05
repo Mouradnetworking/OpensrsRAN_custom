@@ -537,7 +537,7 @@ TEST_F(cu_cp_pdu_session_resource_modify_test,
   ASSERT_TRUE(send_pdu_session_modify_request_and_await_bearer_context_modification_request(psi, {qfi}, {}));
 
   // Inject Bearer Context Modification Response and await UE Context Modification Request
-  ASSERT_TRUE(send_bearer_context_modification_response_and_await_ue_context_modification_request());
+  ASSERT_TRUE(send_bearer_context_modification_response_and_await_ue_context_modification_request(psi, drb_id_t::drb1));
 
   // Inject UE Context Modification Response and await Bearer Context Modification Request
   ASSERT_TRUE(

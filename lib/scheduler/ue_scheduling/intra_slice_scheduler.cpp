@@ -740,7 +740,21 @@ std::optional<ue_newtx_candidate> intra_slice_scheduler::create_newtx_ul_candida
   // Check if the UE has pending data to transmit.
   unsigned pending_bytes = u.pending_ul_newtx_bytes();
   if (pending_bytes == 0) {
-    return std::nullopt;
+    // For an MFBR-capped (GBR) LCG, the gNB cannot rely solely on the UE's own SR/BSR-driven request cadence to
+    // sustain the target bitrate: TS 38.321's Regular BSR only re-triggers when new data arrives at a previously
+    // empty queue, and Periodic/Padding BSR both require an existing grant to be transmitted at all - so once the
+    // last-known (possibly stale) backlog estimate reads zero, the UE has no standards-compliant way to
+    // proactively tell the gNB about new data without first being granted something. Waiting passively collapses
+    // grant frequency to whatever cadence the UE's own SR/BSR logic happens to settle into, which is designed for
+    // best-effort responsiveness, not for sustaining a guaranteed bitrate. Proactively keep offering this UE small
+    // probe grants instead, so it always has an immediate opportunity to report an updated buffer status or send
+    // small amounts of real data - this is the scheduler-side analogue of what a Configured Grant (TS 38.321,
+    // Type 1/2) would provide for a GBR flow without relying on SR/BSR at all; that is not implemented here.
+    if (not u.has_ul_mfbr_cap()) {
+      return std::nullopt;
+    }
+    static constexpr unsigned UL_MFBR_PROBE_GRANT_BYTES = 16;
+    pending_bytes = UL_MFBR_PROBE_GRANT_BYTES;
   }
 
   if (not can_allocate_pusch(u, ue_cc)) {

@@ -64,8 +64,18 @@ std::unique_ptr<e2_agent> srsran::create_e2_cu_cp_agent(const e2ap_configuration
                                                      std::move(e2sm_kpm_iface)});
 
   // E2SM-RC
-  auto                                  e2sm_rc_packer = std::make_unique<e2sm_rc_asn1_packer>();
-  auto                                  e2sm_rc_iface  = std::make_unique<e2sm_rc_impl>(logger, *e2sm_rc_packer);
+  auto e2sm_rc_packer = std::make_unique<e2sm_rc_asn1_packer>();
+  auto e2sm_rc_iface  = std::make_unique<e2sm_rc_impl>(logger, *e2sm_rc_packer);
+
+  // Style 1: Radio Bearer Control (DRB QoS Configuration, Action 1).
+  std::unique_ptr<e2sm_control_service> rc_control_service_style_1 = std::make_unique<e2sm_rc_control_service>(1);
+  std::unique_ptr<e2sm_control_action_executor> rc_control_action_1_1_executor =
+      std::make_unique<e2sm_rc_control_action_1_1_cu_executor>(*cu_configurator_);
+  rc_control_service_style_1->add_e2sm_rc_control_action_executor(std::move(rc_control_action_1_1_executor));
+  e2sm_rc_packer->add_e2sm_control_service(rc_control_service_style_1.get());
+  e2sm_rc_iface->add_e2sm_control_service(std::move(rc_control_service_style_1));
+
+  // Style 3: Connected Mode Mobility (Handover, Action 1).
   int                                   control_service_style_id = 3;
   std::unique_ptr<e2sm_control_service> rc_control_service_style =
       std::make_unique<e2sm_rc_control_service>(control_service_style_id);

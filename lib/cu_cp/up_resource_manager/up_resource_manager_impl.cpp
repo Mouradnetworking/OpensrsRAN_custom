@@ -33,9 +33,10 @@ up_resource_manager::up_resource_manager(const up_resource_manager_cfg& cfg_) :
 }
 
 bool up_resource_manager::validate_request(
-    const slotted_id_vector<pdu_session_id_t, cu_cp_pdu_session_res_setup_item>& setup_items) const
+    const slotted_id_vector<pdu_session_id_t, cu_cp_pdu_session_res_setup_item>& setup_items,
+    ngap_cause_t*                                                                failure_cause) const
 {
-  return is_valid(setup_items, context, cfg, logger);
+  return is_valid(setup_items, context, cfg, logger, failure_cause);
 }
 
 bool up_resource_manager::validate_request(const cu_cp_pdu_session_resource_modify_request& pdu) const
