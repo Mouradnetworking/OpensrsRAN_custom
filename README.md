@@ -166,7 +166,7 @@ sudo pacman -S cmake make base-devel fftw mbedtls yaml-cpp lksctp-tools
 ### 6.1 Clone the repository
 
 ```bash
-git clone https://github.com/Mouradnetworking/srsran.git srsRAN_Project
+https://github.com/Mouradnetworking/OpensrsRAN_custom.git srsRAN_Project
 cd srsRAN_Project
 ```
 
